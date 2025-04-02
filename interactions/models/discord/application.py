@@ -4,8 +4,11 @@ import attrs
 
 from interactions.client.const import MISSING
 from interactions.client.utils.attr_converters import optional
+from interactions.client.utils.serializer import to_image_data
 from interactions.models.discord.asset import Asset
+from interactions.models.discord.emoji import CustomEmoji
 from interactions.models.discord.enums import ApplicationFlags
+from interactions.models.discord.file import UPLOADABLE_TYPE
 from interactions.models.discord.snowflake import Snowflake_Type, to_snowflake
 from interactions.models.discord.team import Team
 from .base import DiscordObject
@@ -62,6 +65,9 @@ class Application(DiscordObject):
     # todo: implement an ApplicationInstallParams object. See https://discord.com/developers/docs/resources/application#install-params-object
     install_params: Optional[dict] = attrs.field(repr=False, default=None)
     """The application's settings for in-app invitation to guilds"""
+    # todo: implement IntegrationTypeConfigurationObject too, see https://discord.com/developers/docs/resources/application#application-object-application-integration-type-configuration-object
+    integration_types_config: Optional[dict] = attrs.field(repr=False, default=None)
+    """Default scopes and permissions for each supported installation context. Value for each key is an integration type configuration object"""
     custom_install_url: Optional[str] = attrs.field(repr=False, default=None)
     """The application's custom authorization link for invitation to a guild"""
 
@@ -85,3 +91,35 @@ class Application(DiscordObject):
     def owner(self) -> "User":
         """The user object for the owner of this application"""
         return self._client.cache.get_user(self.owner_id)
+
+    async def fetch_all_emoji(self) -> List[CustomEmoji]:
+        """Fetch all emojis for this application"""
+        response = await self.client.http.get_application_emojis(self.id)
+        return [self.client.cache.place_emoji_data(None, emoji) for emoji in response]
+
+    async def fetch_emoji(self, emoji_id: Snowflake_Type) -> CustomEmoji:
+        """Fetch an emoji for this application"""
+        response = await self.client.http.get_application_emoji(self.id, emoji_id)
+        return self.client.cache.place_emoji_data(None, response)
+
+    async def create_emoji(self, name: str, imagefile: UPLOADABLE_TYPE) -> CustomEmoji:
+        """Create an emoji for this application"""
+        data_payload = {
+            "name": name,
+            "image": to_image_data(imagefile),
+            "roles": MISSING,
+        }
+
+        return self.client.cache.place_emoji_data(
+            None, await self.client.http.create_application_emoji(data_payload, self.id)
+        )
+
+    async def edit_emoji(self, emoji_id: Snowflake_Type, name: str) -> CustomEmoji:
+        """Edit an emoji for this application"""
+        return self.client.cache.place_emoji_data(
+            None, await self.client.http.edit_application_emoji(self.id, emoji_id, name)
+        )
+
+    async def delete_emoji(self, emoji_id: Snowflake_Type) -> None:
+        """Delete an emoji for this application"""
+        await self.client.http.delete_application_emoji(self.id, emoji_id)

@@ -9,7 +9,7 @@ from interactions.client.utils.attr_utils import docs
 from interactions.models.discord.snowflake import to_snowflake
 
 if TYPE_CHECKING:
-    from interactions import Client
+    from interactions.client.client import Client
     from interactions.models.discord.snowflake import Snowflake_Type
     from interactions.models.discord.guild import Guild
 
@@ -59,6 +59,7 @@ class BaseEvent:
             ```
         Returns:
             A listener object.
+
         """
         listener = models.Listener.create(cls().resolved_name)(coro)
         client.add_listener(listener)

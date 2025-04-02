@@ -1,3 +1,8 @@
+---
+search:
+  exclude: true
+---
+
 # Ext Index
 
 These files contain useful features that help you develop a bot
@@ -13,3 +18,6 @@ These files contain useful features that help you develop a bot
 
 - [Prefixed Commands](prefixed_commands)
     - An extension to allow prefixed/text commands
+
+- [Hybrid Commands](hybrid_commands)
+    - An extension that makes hybrid slash/prefixed commands

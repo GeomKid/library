@@ -19,7 +19,7 @@ try:
     )
 except ModuleNotFoundError:
     get_logger().error(
-        "jurigged not installed, cannot enable jurigged integration.  Install with `pip install interactions[jurigged]`"
+        "jurigged not installed, cannot enable jurigged integration.  Install with `pip install discord-py-interactions[jurigged]`"
     )
     raise
 
@@ -33,6 +33,7 @@ def get_all_commands(module: ModuleType) -> Dict[str, Callable]:
 
     Args:
         module: Module to extract commands from
+
     """
     commands = {}
 
@@ -77,6 +78,7 @@ class Jurigged(Extension):
 
         Args:
             event: jurigged event
+
         """
         if isinstance(event, WatchOperation):
             self.bot.logger.debug(f"Watch {event.filename}")
@@ -111,6 +113,7 @@ class Jurigged(Extension):
         Args:
             _path: Path to file
             cf: File information
+
         """
         if self.bot.get_ext(cf.module_name):
             self.bot.logger.debug(f"Caching {cf.module_name}")
@@ -123,6 +126,7 @@ class Jurigged(Extension):
         Args:
             _path: Path to file
             cf: File information
+
         """
         if not self.bot.get_ext(cf.module_name):
             return

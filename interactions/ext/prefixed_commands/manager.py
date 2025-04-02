@@ -9,7 +9,6 @@ from interactions.api.events.discord import MessageCreate
 from interactions.api.events.internal import (
     CommandError,
     CommandCompletion,
-    CallbackAdded,
     ExtensionUnload,
 )
 from interactions.client.client import Client
@@ -46,6 +45,7 @@ class PrefixedManager:
             that takes in a `Client` and `Message` object and returns either a \
             string or an iterable of strings. Defaults to `None`.
         prefixed_context: The object to instantiate for Prefixed Context
+
     """
 
     def __init__(
@@ -89,12 +89,12 @@ class PrefixedManager:
         self.client.prefixed = self
 
         self._dispatch_prefixed_commands = self._dispatch_prefixed_commands.copy_with_binding(self)
-        self._register_command = self._register_command.copy_with_binding(self)
         self._handle_ext_unload = self._handle_ext_unload.copy_with_binding(self)
 
         self.client.add_listener(self._dispatch_prefixed_commands)
-        self.client.add_listener(self._register_command)
         self.client.add_listener(self._handle_ext_unload)
+
+        self.client._add_command_hook.append(self._register_command)
 
     async def generate_prefixes(self, client: Client, msg: Message) -> str | list[str]:
         """
@@ -108,6 +108,7 @@ class PrefixedManager:
 
         Returns:
             The prefix(es) to check for.
+
         """
         return self.default_prefix  # type: ignore
 
@@ -117,6 +118,7 @@ class PrefixedManager:
 
         Args:
             command: The command to add.
+
         """
         if command.is_subcommand:
             raise ValueError("You cannot add subcommands to the client - add the base command instead.")
@@ -149,6 +151,7 @@ class PrefixedManager:
 
         Returns:
             The command object, if found.
+
         """
         if " " not in name:
             return self.commands.get(name)
@@ -197,6 +200,7 @@ class PrefixedManager:
         Returns:
             The command that was removed, if one was. If the command was not found,
             this function returns `None`.
+
         """
         command = self.get_command(name)
 
@@ -224,22 +228,18 @@ class PrefixedManager:
 
         return command
 
-    @listen("callback_added")
-    async def _register_command(self, event: CallbackAdded) -> None:
+    def _register_command(self, callback: Callable) -> None:
         """Registers a prefixed command, if there is one given."""
-        if not isinstance(event.callback, PrefixedCommand):
+        if not isinstance(callback, PrefixedCommand):
             return
 
-        cmd = event.callback
-        cmd.extension = event.extension
-
-        if not cmd.is_subcommand:
-            self.add_command(cmd)
+        if not callback.is_subcommand:
+            self.add_command(callback)
 
     @listen("extension_unload")
     async def _handle_ext_unload(self, event: ExtensionUnload) -> None:
         """Unregisters all prefixed commands in an extension as it is being unloaded."""
-        for name in self._ext_command_list[event.extension.extension_name]:
+        for name in self._ext_command_list[event.extension.extension_name].copy():
             self.remove_command(name)
 
     @listen("raw_message_create", is_default_listener=True)
@@ -367,6 +367,7 @@ def setup(
 
     Returns:
         PrefixedManager: The class that deals with all things prefixed commands.
+
     """
     return PrefixedManager(
         client,

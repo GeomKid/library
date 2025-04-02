@@ -1,7 +1,13 @@
+import typing
 from abc import ABC, abstractmethod
 from datetime import datetime, timedelta, timezone
 
-__all__ = ("BaseTrigger", "IntervalTrigger", "DateTrigger", "TimeTrigger", "OrTrigger")
+if typing.TYPE_CHECKING:
+    from datetime import _TzInfo
+
+from croniter import croniter
+
+__all__ = ("BaseTrigger", "IntervalTrigger", "DateTrigger", "TimeTrigger", "OrTrigger", "CronTrigger")
 
 
 class BaseTrigger(ABC):
@@ -18,6 +24,9 @@ class BaseTrigger(ABC):
     def reschedule(self) -> None:
         """Update the last call time to now"""
         self.last_call_time = datetime.now()
+
+    def set_last_call_time(self, call_time: datetime) -> None:
+        self.last_call_time = call_time
 
     @abstractmethod
     def next_fire(self) -> datetime | None:
@@ -102,7 +111,11 @@ class TimeTrigger(BaseTrigger):
         )
         if target.tzinfo == timezone.utc:
             target = target.astimezone(now.tzinfo)
-            target = target.replace(tzinfo=None)
+            # target can fall behind or go forward a day, but all we need is the time itself
+            # to be converted
+            # to ensure it's on the same day as "now" and not break the next if statement,
+            # we can just replace the date with now's date
+            target = target.replace(year=now.year, month=now.month, day=now.day, tzinfo=None)
 
         if target <= self.last_call_time:
             target += timedelta(days=1)
@@ -114,6 +127,10 @@ class OrTrigger(BaseTrigger):
 
     def __init__(self, *trigger: BaseTrigger) -> None:
         self.triggers: list[BaseTrigger] = list(trigger)
+        self.current_trigger: BaseTrigger = None
+
+    def set_last_call_time(self, call_time: datetime) -> None:
+        self.current_trigger.last_call_time = call_time
 
     def _get_delta(self, d: BaseTrigger) -> timedelta:
         next_fire = d.next_fire()
@@ -123,8 +140,27 @@ class OrTrigger(BaseTrigger):
         self.triggers.append(other)
         return self
 
+    def _set_current_trigger(self) -> BaseTrigger | None:
+        self.current_trigger = self.triggers[0] if len(self.triggers) == 1 else min(self.triggers, key=self._get_delta)
+        return self.current_trigger
+
     def next_fire(self) -> datetime | None:
-        if len(self.triggers) == 1:
-            return self.triggers[0].next_fire()
-        trigger = min(self.triggers, key=self._get_delta)
-        return trigger.next_fire()
+        return self.current_trigger.next_fire() if self._set_current_trigger() else None
+
+
+class CronTrigger(BaseTrigger):
+    """
+    Trigger the task based on a cron schedule.
+
+    Attributes:
+        cron str: The cron schedule, use https://crontab.guru for help
+        tz datetime: Whether or not to use UTC for the time (uses timezone information)
+
+    """
+
+    def __init__(self, cron: str, tz: "_TzInfo" = timezone.utc) -> None:
+        self.cron = cron
+        self.tz = tz
+
+    def next_fire(self) -> datetime | None:
+        return croniter(self.cron, self.last_call_time.astimezone(self.tz)).next(datetime)

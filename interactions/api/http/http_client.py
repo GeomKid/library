@@ -1,4 +1,5 @@
 """This file handles the interaction with discords http endpoints."""
+
 import asyncio
 import inspect
 import os
@@ -10,7 +11,7 @@ from weakref import WeakValueDictionary
 
 import aiohttp
 import discord_typings
-from aiohttp import BaseConnector, ClientSession, ClientWebSocketResponse, FormData
+from aiohttp import BaseConnector, ClientSession, ClientWebSocketResponse, FormData, BasicAuth
 from multidict import CIMultiDictProxy
 
 import interactions.client.const as constants
@@ -19,6 +20,7 @@ from interactions.api.http.http_requests import (
     BotRequests,
     ChannelRequests,
     EmojiRequests,
+    EntitlementRequests,
     GuildRequests,
     InteractionRequests,
     MemberRequests,
@@ -79,6 +81,7 @@ class GlobalLock:
 
         Args:
             delta: The time to wait before resetting the calls.
+
         """
         self._reset_time = time.perf_counter() + delta
         self._calls = 0
@@ -133,11 +136,16 @@ class BucketLock:
             header: The header to ingest, containing rate limit information.
 
         Updates the bucket_hash, limit, remaining, and delta attributes with the information from the header.
+
         """
         self.bucket_hash = header.get("x-ratelimit-bucket")
         self.limit = int(header.get("x-ratelimit-limit", self.DEFAULT_LIMIT))
         self.remaining = int(header.get("x-ratelimit-remaining", self.DEFAULT_REMAINING))
         self.delta = float(header.get("x-ratelimit-reset-after", self.DEFAULT_DELTA))
+
+        if self.delta < 0.005 and self.remaining == 0:  # the delta value is so small that we can assume it's 0
+            self.delta = self.DEFAULT_DELTA
+            self.remaining = self.DEFAULT_REMAINING  # we can assume that we can make another request right away
 
         if self._semaphore is None or self._semaphore._value != self.limit:
             self._semaphore = asyncio.Semaphore(self.limit)
@@ -174,6 +182,7 @@ class BucketLock:
 
         Raises:
             RuntimeError: If the bucket is already locked.
+
         """
         if self._lock.locked():
             raise RuntimeError("Attempted to lock a bucket that is already locked.")
@@ -187,7 +196,7 @@ class BucketLock:
             await _release()
         else:
             await self._lock.acquire()
-            _ = asyncio.create_task(_release())
+            _ = asyncio.create_task(_release())  # noqa: RUF006
 
     async def __aenter__(self) -> None:
         await self.acquire()
@@ -200,6 +209,7 @@ class HTTPClient(
     BotRequests,
     ChannelRequests,
     EmojiRequests,
+    EntitlementRequests,
     GuildRequests,
     InteractionRequests,
     MemberRequests,
@@ -214,7 +224,11 @@ class HTTPClient(
     """A http client for sending requests to the Discord API."""
 
     def __init__(
-        self, connector: BaseConnector | None = None, logger: Logger = MISSING, show_ratelimit_tracebacks: bool = False
+        self,
+        connector: BaseConnector | None = None,
+        logger: Logger = MISSING,
+        show_ratelimit_tracebacks: bool = False,
+        proxy: tuple[str | None, BasicAuth | None] | None = None,
     ) -> None:
         self.connector: BaseConnector | None = connector
         self.__session: ClientSession | None = None
@@ -229,6 +243,8 @@ class HTTPClient(
         self.user_agent: str = (
             f"DiscordBot ({__repo_url__} {__version__} Python/{__py_version__}) aiohttp/{aiohttp.__version__}"
         )
+        self.proxy: tuple[str | None, BasicAuth | None] | None = proxy
+        self.__proxy_validated: bool = False
 
         if logger is MISSING:
             logger = constants.get_logger()
@@ -243,6 +259,7 @@ class HTTPClient(
 
         Returns:
             The BucketLock object for this route
+
         """
         if bucket_hash := self._endpoints.get(route.rl_bucket):
             if lock := self.ratelimit_locks.get(bucket_hash):
@@ -260,6 +277,7 @@ class HTTPClient(
             route: The route we're ingesting ratelimit for
             header: The rate limit header in question
             bucket_lock: The rate limit bucket for this route
+
         """
         bucket_lock.ingest_ratelimit_header(header)
 
@@ -282,6 +300,7 @@ class HTTPClient(
 
         Returns:
             Either a dictionary or multipart data form
+
         """
         if isinstance(payload, FormData):
             return payload
@@ -300,7 +319,11 @@ class HTTPClient(
         else:
             payload = [dict_filter(x) if isinstance(x, dict) else x for x in payload]
 
-        if not files:
+        if files is None:
+            return payload
+
+        if files == []:
+            payload["attachments"] = []
             return payload
 
         if not isinstance(files, list):
@@ -383,6 +406,10 @@ class HTTPClient(
                     else:
                         kwargs["json"] = processed_data  # pyright: ignore
                     await self.global_lock.wait()
+
+                    if self.proxy:
+                        kwargs["proxy"] = self.proxy[0]
+                        kwargs["proxy_auth"] = self.proxy[1]
 
                     async with self.__session.request(route.method, route.url, **kwargs) as response:
                         result = await response_decode(response)
@@ -467,6 +494,7 @@ class HTTPClient(
         Args:
             log_func: The logging function to use
             message: The message to log
+
         """
         if self.show_ratelimit_traceback:
             if frame := next(
@@ -505,6 +533,19 @@ class HTTPClient(
             connector=self.connector or aiohttp.TCPConnector(limit=self.global_lock.max_requests),
             json_serialize=FastJson.dumps,
         )
+        if not self.__proxy_validated and self.proxy:
+            try:
+                self.logger.info(f"Validating Proxy @ {self.proxy[0]}")
+                async with self.__session.get(
+                    "http://icanhazip.com/", proxy=self.proxy[0], proxy_auth=self.proxy[1]
+                ) as response:
+                    if response.status != 200:
+                        raise RuntimeError("Proxy configuration is invalid")
+                    self.logger.info(f"Proxy Connected @ {(await response.text()).strip()}")
+                    self.__proxy_validated = True
+            except Exception as e:
+                raise RuntimeError("Proxy configuration is invalid") from e
+
         self.token = token
         try:
             result = await self.request(Route("GET", "/users/@me"))
@@ -556,4 +597,6 @@ class HTTPClient(
             autoclose=False,
             headers={"User-Agent": self.user_agent},
             compress=0,
+            proxy=self.proxy[0] if self.proxy else None,
+            proxy_auth=self.proxy[1] if self.proxy else None,
         )

@@ -1,34 +1,34 @@
 """
 These are events dispatched by Discord. This is intended as a reference so you know what data to expect for each event.
 
-??? Hint "Example Usage:"
-    The event classes outlined here are in `CamelCase` to comply with Class naming convention, however the event names
-    are actually in `lower_case_with_underscores` so your listeners should be named as following:
+???+ hint "Example Usage"
+    To listen to an event, use the `listen` decorator:
 
     ```python
-    @listen()
-    def on_ready():
-        # ready events pass no data, so dont have params
-        print("Im ready!")
+    from interactions import listen
+    from interactions.api.events import ChannelCreate  # or any other event
 
-    @listen()
-    def on_guild_join(event):
-        # guild_create events pass a guild object, expect a single param
-        print(f"{event.guild.name} created")
+    @listen(ChannelCreate)
+    async def an_event_handler(event: ChannelCreate):
+        print(f"Channel created with name: {event.channel.name}")
     ```
+
+    For more information, including other ways to listen to events, see [the events guide](/interactions.py/Guides/10 Events).
+
 !!! warning
     While all of these events are documented, not all of them are used, currently.
 
 """
 
-from typing import TYPE_CHECKING, List, Sequence, Union, Optional
+from typing import TYPE_CHECKING, List, Optional, Sequence, Union
 
 import attrs
 
 import interactions.models
-from interactions.api.events.base import GuildEvent, BaseEvent
+from interactions.api.events.base import BaseEvent, GuildEvent
 from interactions.client.const import Absent
 from interactions.client.utils.attr_utils import docs
+from interactions.models.discord.snowflake import to_snowflake
 
 __all__ = (
     "ApplicationCommandPermissionsUpdate",
@@ -43,11 +43,19 @@ __all__ = (
     "ChannelDelete",
     "ChannelPinsUpdate",
     "ChannelUpdate",
+    "EntitlementCreate",
+    "EntitlementDelete",
+    "EntitlementUpdate",
     "GuildAuditLogEntryCreate",
     "GuildEmojisUpdate",
     "GuildJoin",
     "GuildLeft",
     "GuildMembersChunk",
+    "GuildScheduledEventCreate",
+    "GuildScheduledEventUpdate",
+    "GuildScheduledEventDelete",
+    "GuildScheduledEventUserAdd",
+    "GuildScheduledEventUserRemove",
     "GuildStickersUpdate",
     "GuildAvailable",
     "GuildUnavailable",
@@ -64,9 +72,12 @@ __all__ = (
     "MessageCreate",
     "MessageDelete",
     "MessageDeleteBulk",
+    "MessagePollVoteAdd",
+    "MessagePollVoteRemove",
     "MessageReactionAdd",
     "MessageReactionRemove",
     "MessageReactionRemoveAll",
+    "MessageReactionRemoveEmoji",
     "MessageUpdate",
     "NewThreadCreate",
     "PresenceUpdate",
@@ -94,21 +105,28 @@ __all__ = (
 
 
 if TYPE_CHECKING:
-    from interactions.models.discord.guild import Guild, GuildIntegration
-    from interactions.models.discord.channel import BaseChannel, TYPE_THREAD_CHANNEL, VoiceChannel
-    from interactions.models.discord.message import Message
-    from interactions.models.discord.timestamp import Timestamp
-    from interactions.models.discord.user import Member, User, BaseUser
-    from interactions.models.discord.snowflake import Snowflake_Type
     from interactions.models.discord.activity import Activity
-    from interactions.models.discord.emoji import CustomEmoji, PartialEmoji
-    from interactions.models.discord.role import Role
-    from interactions.models.discord.sticker import Sticker
-    from interactions.models.discord.voice_state import VoiceState
-    from interactions.models.discord.stage_instance import StageInstance
-    from interactions.models.discord.auto_mod import AutoModerationAction, AutoModRule
-    from interactions.models.discord.reaction import Reaction
     from interactions.models.discord.app_perms import ApplicationCommandPermission
+    from interactions.models.discord.auto_mod import AutoModerationAction, AutoModRule
+    from interactions.models.discord.channel import (
+        TYPE_ALL_CHANNEL,
+        TYPE_THREAD_CHANNEL,
+        VoiceChannel,
+    )
+    from interactions.models.discord.emoji import CustomEmoji, PartialEmoji
+    from interactions.models.discord.entitlement import Entitlement
+    from interactions.models.discord.guild import Guild, GuildIntegration
+    from interactions.models.discord.message import Message
+    from interactions.models.discord.poll import Poll
+    from interactions.models.discord.reaction import Reaction
+    from interactions.models.discord.role import Role
+    from interactions.models.discord.scheduled_event import ScheduledEvent
+    from interactions.models.discord.snowflake import Snowflake_Type
+    from interactions.models.discord.stage_instance import StageInstance
+    from interactions.models.discord.sticker import Sticker
+    from interactions.models.discord.timestamp import Timestamp
+    from interactions.models.discord.user import BaseUser, Member, User
+    from interactions.models.discord.voice_state import VoiceState
 
 
 @attrs.define(eq=False, order=False, hash=False, kw_only=False)
@@ -116,12 +134,14 @@ class AutoModExec(BaseEvent):
     """Dispatched when an auto modation action is executed"""
 
     execution: "AutoModerationAction" = attrs.field(repr=False, metadata=docs("The executed auto mod action"))
-    channel: "BaseChannel" = attrs.field(repr=False, metadata=docs("The channel the action was executed in"))
+    channel: "TYPE_ALL_CHANNEL" = attrs.field(repr=False, metadata=docs("The channel the action was executed in"))
     guild: "Guild" = attrs.field(repr=False, metadata=docs("The guild the action was executed in"))
 
 
 @attrs.define(eq=False, order=False, hash=False, kw_only=False)
 class AutoModCreated(BaseEvent):
+    """Dispatched when an auto mod rule is created"""
+
     guild: "Guild" = attrs.field(repr=False, metadata=docs("The guild the rule was modified in"))
     rule: "AutoModRule" = attrs.field(repr=False, metadata=docs("The rule that was modified"))
 
@@ -142,6 +162,7 @@ class AutoModDeleted(AutoModCreated):
 
 @attrs.define(eq=False, order=False, hash=False, kw_only=False)
 class ApplicationCommandPermissionsUpdate(BaseEvent):
+    id: "Snowflake_Type" = attrs.field(repr=False, metadata=docs("The ID of the command permissions were updated for"))
     guild_id: "Snowflake_Type" = attrs.field(
         repr=False, metadata=docs("The guild the command permissions were updated in")
     )
@@ -157,18 +178,18 @@ class ApplicationCommandPermissionsUpdate(BaseEvent):
 class ChannelCreate(BaseEvent):
     """Dispatched when a channel is created."""
 
-    channel: "BaseChannel" = attrs.field(repr=False, metadata=docs("The channel this event is dispatched from"))
+    channel: "TYPE_ALL_CHANNEL" = attrs.field(repr=False, metadata=docs("The channel this event is dispatched from"))
 
 
 @attrs.define(eq=False, order=False, hash=False, kw_only=False)
 class ChannelUpdate(BaseEvent):
     """Dispatched when a channel is updated."""
 
-    before: "BaseChannel" = attrs.field(
+    before: "TYPE_ALL_CHANNEL" = attrs.field(
         repr=False,
     )
     """Channel before this event. MISSING if it was not cached before"""
-    after: "BaseChannel" = attrs.field(
+    after: "TYPE_ALL_CHANNEL" = attrs.field(
         repr=False,
     )
     """Channel after this event"""
@@ -219,7 +240,7 @@ class ThreadListSync(BaseEvent):
         repr=False,
     )
     """The parent channel ids whose threads are being synced. If omitted, then threads were synced for the entire guild. This array may contain channel_ids that have no active threads as well, so you know to clear that data."""
-    threads: List["BaseChannel"] = attrs.field(
+    threads: List["TYPE_ALL_CHANNEL"] = attrs.field(
         repr=False,
     )
     """all active threads in the given channels that the current user can access"""
@@ -248,7 +269,7 @@ class ThreadMemberUpdate(ThreadCreate):
 
 
 @attrs.define(eq=False, order=False, hash=False, kw_only=False)
-class ThreadMembersUpdate(BaseEvent):
+class ThreadMembersUpdate(GuildEvent):
     """Dispatched when anyone is added or removed from a thread."""
 
     id: "Snowflake_Type" = attrs.field(
@@ -261,6 +282,11 @@ class ThreadMembersUpdate(BaseEvent):
     """Users added to the thread"""
     removed_member_ids: List["Snowflake_Type"] = attrs.field(repr=False, factory=list)
     """Users removed from the thread"""
+
+    @property
+    def channel(self) -> Optional["TYPE_THREAD_CHANNEL"]:
+        """The thread channel this event is dispatched from"""
+        return self.client.get_channel(self.id)
 
 
 @attrs.define(eq=False, order=False, hash=False, kw_only=False)
@@ -291,6 +317,9 @@ class GuildUpdate(BaseEvent):
 @attrs.define(eq=False, order=False, hash=False, kw_only=False)
 class GuildLeft(BaseEvent):
     """Dispatched when a guild is left."""
+
+    guild_id: "Snowflake_Type" = attrs.field(repr=True, converter=to_snowflake)
+    """The ID of the guild"""
 
     guild: "Guild" = attrs.field(repr=True)
     """The guild this event is dispatched from"""
@@ -553,6 +582,82 @@ class MessageReactionRemoveAll(GuildEvent):
 
 
 @attrs.define(eq=False, order=False, hash=False, kw_only=False)
+class MessageReactionRemoveEmoji(MessageReactionRemoveAll):
+    """Dispatched when all reactions of a specifc emoji are removed from a message."""
+
+    emoji: "PartialEmoji" = attrs.field(
+        repr=False,
+    )
+    """The emoji that was removed"""
+
+
+@attrs.define(eq=False, order=False, hash=False, kw_only=False)
+class BaseMessagePollEvent(BaseEvent):
+    user_id: "Snowflake_Type" = attrs.field(repr=False)
+    """The ID of the user that voted"""
+    channel_id: "Snowflake_Type" = attrs.field(repr=False)
+    """The ID of the channel the poll is in"""
+    message_id: "Snowflake_Type" = attrs.field(repr=False)
+    """The ID of the message the poll is in"""
+    answer_id: int = attrs.field(repr=False)
+    """The ID of the answer the user voted for"""
+    guild_id: "Optional[Snowflake_Type]" = attrs.field(repr=False, default=None)
+    """The ID of the guild the poll is in"""
+
+    def get_message(self) -> "Optional[Message]":
+        """Get the message object if it is cached"""
+        return self.client.cache.get_message(self.channel_id, self.message_id)
+
+    def get_user(self) -> "Optional[User]":
+        """Get the user object if it is cached"""
+        return self.client.get_user(self.user_id)
+
+    def get_channel(self) -> "Optional[TYPE_ALL_CHANNEL]":
+        """Get the channel object if it is cached"""
+        return self.client.get_channel(self.channel_id)
+
+    def get_guild(self) -> "Optional[Guild]":
+        """Get the guild object if it is cached"""
+        return self.client.get_guild(self.guild_id) if self.guild_id is not None else None
+
+    def get_poll(self) -> "Optional[Poll]":
+        """Get the poll object if it is cached"""
+        message = self.get_message()
+        return message.poll if message is not None else None
+
+    async def fetch_message(self) -> "Message":
+        """Fetch the message the poll is in"""
+        return await self.client.cache.fetch_message(self.channel_id, self.message_id)
+
+    async def fetch_user(self) -> "User":
+        """Fetch the user that voted"""
+        return await self.client.fetch_user(self.user_id)
+
+    async def fetch_channel(self) -> "TYPE_ALL_CHANNEL":
+        """Fetch the channel the poll is in"""
+        return await self.client.fetch_channel(self.channel_id)
+
+    async def fetch_guild(self) -> "Optional[Guild]":
+        """Fetch the guild the poll is in"""
+        return await self.client.fetch_guild(self.guild_id) if self.guild_id is not None else None
+
+    async def fetch_poll(self) -> "Poll":
+        """Fetch the poll object"""
+        message = await self.fetch_message()
+        return message.poll
+
+
+@attrs.define(eq=False, order=False, hash=False, kw_only=False)
+class MessagePollVoteAdd(BaseMessagePollEvent):
+    """Dispatched when a user votes in a poll"""
+
+
+@attrs.define(eq=False, order=False, hash=False, kw_only=False)
+class MessagePollVoteRemove(BaseMessagePollEvent):
+    """Dispatched when a user remotes a votes in a poll"""
+
+
+@attrs.define(eq=False, order=False, hash=False, kw_only=False)
 class PresenceUpdate(BaseEvent):
     """A user's presence has changed."""
 
@@ -603,7 +708,7 @@ class TypingStart(BaseEvent):
         repr=False,
     )
     """The user who started typing"""
-    channel: "BaseChannel" = attrs.field(
+    channel: "TYPE_ALL_CHANNEL" = attrs.field(
         repr=False,
     )
     """The channel typing is in"""
@@ -747,3 +852,81 @@ class GuildAuditLogEntryCreate(GuildEvent):
 
     audit_log_entry: interactions.models.AuditLogEntry = attrs.field(repr=False)
     """The audit log entry object"""
+
+
+@attrs.define(eq=False, order=False, hash=False, kw_only=False)
+class GuildScheduledEventCreate(BaseEvent):
+    """Dispatched when scheduled event is created"""
+
+    scheduled_event: "ScheduledEvent" = attrs.field(repr=True)
+    """The scheduled event object"""
+
+
+@attrs.define(eq=False, order=False, hash=False, kw_only=False)
+class GuildScheduledEventUpdate(BaseEvent):
+    """Dispatched when scheduled event is updated"""
+
+    before: Absent["ScheduledEvent"] = attrs.field(repr=True)
+    """The scheduled event before this event was created"""
+    after: "ScheduledEvent" = attrs.field(repr=True)
+    """The scheduled event after this event was created"""
+
+
+@attrs.define(eq=False, order=False, hash=False, kw_only=False)
+class GuildScheduledEventDelete(GuildScheduledEventCreate):
+    """Dispatched when scheduled event is deleted"""
+
+
+@attrs.define(eq=False, order=False, hash=False, kw_only=False)
+class GuildScheduledEventUserAdd(GuildEvent):
+    """Dispatched when scheduled event is created"""
+
+    scheduled_event_id: "Snowflake_Type" = attrs.field(repr=True)
+    """The ID of the scheduled event"""
+    user_id: "Snowflake_Type" = attrs.field(repr=True)
+    """The ID of the user that has been added/removed from scheduled event"""
+
+    @property
+    def scheduled_event(self) -> Optional["ScheduledEvent"]:
+        """The scheduled event object if cached"""
+        return self.client.get_scheduled_event(self.scheduled_event_id)
+
+    @property
+    def user(self) -> Optional["User"]:
+        """The user that has been added/removed from scheduled event if cached"""
+        return self.client.get_user(self.user_id)
+
+    @property
+    def member(self) -> Optional["Member"]:
+        """The guild member that has been added/removed from scheduled event if cached"""
+        return self.client.get_member(self.guild_id, self.user.id)
+
+
+@attrs.define(eq=False, order=False, hash=False, kw_only=False)
+class GuildScheduledEventUserRemove(GuildScheduledEventUserAdd):
+    """Dispatched when scheduled event is removed"""
+
+
+@attrs.define(eq=False, order=False, hash=False, kw_only=False)
+class BaseEntitlementEvent(BaseEvent):
+    entitlement: "Entitlement" = attrs.field(repr=True)
+
+
+@attrs.define(eq=False, order=False, hash=False, kw_only=False)
+class EntitlementCreate(BaseEntitlementEvent):
+    """Dispatched when a user subscribes to a SKU."""
+
+
+@attrs.define(eq=False, order=False, hash=False, kw_only=False)
+class EntitlementUpdate(BaseEntitlementEvent):
+    """Dispatched when a user's subscription renews for the next billing period."""
+
+
+@attrs.define(eq=False, order=False, hash=False, kw_only=False)
+class EntitlementDelete(BaseEntitlementEvent):
+    """
+    Dispatched when a user's entitlement is deleted.
+
+    Notably, this event is not dispatched when a user's subscription is cancelled.
+    Instead, you simply won't receive an EntitlementUpdate event for the next billing period.
+    """

@@ -18,7 +18,7 @@ from typing import (
 import attrs
 from typing_extensions import Self
 
-from interactions.client.const import MISSING
+from interactions.client.const import MISSING, T
 from interactions.client.errors import BadArgument
 from interactions.client.utils.input_utils import _quotes
 from interactions.client.utils.misc_utils import get_object_name, maybe_coroutine
@@ -27,6 +27,7 @@ from interactions.models.internal.converters import (
     _LiteralConverter,
     NoArgumentConverter,
     Greedy,
+    CONSUME_REST_MARKER,
     MODEL_TO_CONVERTER,
 )
 from interactions.models.internal.protocols import Converter
@@ -62,6 +63,7 @@ class PrefixedCommandParameter:
         "union",
         "variable",
         "consume_rest",
+        "consume_rest_class",
         "no_argument",
     )
 
@@ -90,7 +92,7 @@ class PrefixedCommandParameter:
         self,
         name: str,
         default: Any = MISSING,
-        type: Type = None,
+        type: Type | None = None,
         kind: inspect._ParameterKind = inspect._ParameterKind.POSITIONAL_OR_KEYWORD,
         converters: Optional[list[Callable[["PrefixedContext", str], Any]]] = None,
         greedy: bool = False,
@@ -253,7 +255,7 @@ def _greedy_parse(greedy: Greedy, param: inspect.Parameter) -> Any:
         args = typing.get_args(arg)
 
         if len(args) > 2 or NoneType not in args:
-            raise ValueError(f"Greedy[{repr(arg)}] is invalid.")
+            raise ValueError(f"Greedy[{arg!r}] is invalid.")
 
         arg = args[0]
         default = None
@@ -317,7 +319,7 @@ async def _greedy_convert(
         if param.default:
             greedy_args = param.default  # im sorry, typehinters
         else:
-            raise BadArgument(f"Failed to find any arguments for {repr(param.type)}.")
+            raise BadArgument(f"Failed to find any arguments for {param.type!r}.")
 
     return greedy_args, broke_off
 
@@ -499,12 +501,38 @@ class PrefixedCommand(BaseCommand):
             cmd_param = PrefixedCommandParameter.from_param(param)
             anno = param.annotation
 
+            # this is ugly, ik
+            if typing.get_origin(anno) == Annotated and typing.get_args(anno)[1] is CONSUME_REST_MARKER:
+                cmd_param.consume_rest = True
+                finished_params = True
+                anno = typing.get_args(anno)[0]
+
+                if anno == T:
+                    # someone forgot to typehint
+                    anno = inspect._empty
+
+            if typing.get_origin(anno) == Annotated:
+                anno = _get_from_anno_type(anno)
+
             if typing.get_origin(anno) == Greedy:
+                if finished_params:
+                    raise ValueError("Consume rest arguments cannot be Greedy.")
+
                 anno, default = _greedy_parse(anno, param)
 
                 if default is not param.empty:
                     cmd_param.default = default
                 cmd_param.greedy = True
+
+            if typing.get_origin(anno) == tuple:
+                if cmd_param.optional:
+                    # there's a lot of parser ambiguities here, so i'd rather not
+                    raise ValueError("Variable arguments cannot have default values or be Optional.")
+                cmd_param.variable = True
+                finished_params = True
+
+                # use empty if the typehint is just "tuple"
+                anno = typing.get_args(anno)[0] if typing.get_args(anno) else inspect._empty
 
             if typing.get_origin(anno) in {Union, UnionType}:
                 cmd_param.union = True
@@ -524,22 +552,23 @@ class PrefixedCommand(BaseCommand):
                 converter = _get_converter(anno, name)
                 cmd_param.converters.append(converter)
 
-            match param.kind:
-                case param.KEYWORD_ONLY:
-                    if cmd_param.greedy:
-                        raise ValueError("Keyword-only arguments cannot be Greedy.")
+            if not finished_params:
+                match param.kind:
+                    case param.KEYWORD_ONLY:
+                        if cmd_param.greedy:
+                            raise ValueError("Consume rest arguments cannot be Greedy.")
 
-                    cmd_param.consume_rest = True
-                    finished_params = True
-                case param.VAR_POSITIONAL:
-                    if cmd_param.optional:
-                        # there's a lot of parser ambiguities here, so i'd rather not
-                        raise ValueError("Variable arguments cannot have default values or be Optional.")
-                    if cmd_param.greedy:
-                        raise ValueError("Variable arguments cannot be Greedy.")
+                        cmd_param.consume_rest = True
+                        finished_params = True
+                    case param.VAR_POSITIONAL:
+                        if cmd_param.optional:
+                            # there's a lot of parser ambiguities here, so i'd rather not
+                            raise ValueError("Variable arguments cannot have default values or be Optional.")
+                        if cmd_param.greedy:
+                            raise ValueError("Variable arguments cannot be Greedy.")
 
-                    cmd_param.variable = True
-                    finished_params = True
+                        cmd_param.variable = True
+                        finished_params = True
 
             self.parameters.append(cmd_param)
 
@@ -553,6 +582,7 @@ class PrefixedCommand(BaseCommand):
 
         Args:
             cmd: The command to add
+
         """
         cmd.parent = self  # just so we know this is a subcommand
 
@@ -577,6 +607,7 @@ class PrefixedCommand(BaseCommand):
 
         Args:
             name: The command to remove.
+
         """
         command = self.subcommands.pop(name, None)
 
@@ -599,6 +630,7 @@ class PrefixedCommand(BaseCommand):
 
         Returns:
             PrefixedCommand: The command object, if found.
+
         """
         if " " not in name:
             return self.subcommands.get(name)
@@ -647,6 +679,7 @@ class PrefixedCommand(BaseCommand):
             ignore_extra: If `True`, ignores extraneous strings passed to a command if all its requirements are met \
                 (e.g. ?foo a b c when only expecting a and b). Otherwise, an error is raised.
             inherit_checks: If `True`, the subcommand will inherit its checks from the parent command.
+
         """
 
         def wrapper(func: Callable) -> Self:
@@ -675,6 +708,7 @@ class PrefixedCommand(BaseCommand):
         Args:
             callback (Callable: The callback to run. This is provided for compatibility with internal.
             ctx (internal.MessageContext): The context to use for this command.
+
         """
         # sourcery skip: remove-empty-nested-block, remove-redundant-if, remove-unnecessary-else
         if len(self.parameters) == 0:
@@ -698,7 +732,14 @@ class PrefixedCommand(BaseCommand):
                     args_to_convert = args.get_rest_of_args()
                     new_arg = [await _convert(param, ctx, arg) for arg in args_to_convert]
                     new_arg = tuple(arg[0] for arg in new_arg)
-                    new_args.extend(new_arg)
+
+                    if param.kind == inspect.Parameter.VAR_POSITIONAL:
+                        new_args.extend(new_arg)
+                    elif param.kind == inspect.Parameter.POSITIONAL_ONLY:
+                        new_args.append(new_arg)
+                    else:
+                        kwargs[param.name] = new_arg
+
                     param_index += 1
                     break
 
@@ -779,6 +820,7 @@ def prefixed_command(
         hidden: If `True`, the default help command (when it is added) does not show this in the help output.
         ignore_extra: If `True`, ignores extraneous strings passed to a command if all its requirements are \
             met (e.g. ?foo a b c when only expecting a and b). Otherwise, an error is raised.
+
     """
 
     def wrapper(func: Callable) -> PrefixedCommand:

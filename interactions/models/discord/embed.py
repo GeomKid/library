@@ -148,6 +148,7 @@ class EmbedFooter(DictSerializationMixin):
 
         Returns:
             An EmbedFooter object
+
         """
         return cls(text=ingest) if isinstance(ingest, str) else cls.from_dict(ingest)
 
@@ -229,6 +230,12 @@ class Embed(DictSerializationMixin):
         metadata=no_export_meta,
     )
 
+    @classmethod
+    def _process_dict(cls, data: Dict[str, Any]) -> Dict[str, Any]:
+        if image_data := data.pop("image", None):
+            data["images"] = [image_data]
+        return data
+
     @property
     def image(self) -> Optional[EmbedAttachment]:
         """
@@ -236,6 +243,7 @@ class Embed(DictSerializationMixin):
 
         Raises:
             ValueError: If there are multiple images in the embed.
+
         """
         if len(self.images) <= 1:
             return self.images[0] if self.images else None
@@ -385,6 +393,7 @@ class Embed(DictSerializationMixin):
 
         Args:
             image: the image to add
+
         """
         if len(self.images) > 0 and not self.url:
             raise ValueError("To use multiple images, you must also set a url for this embed")

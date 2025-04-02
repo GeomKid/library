@@ -3,50 +3,65 @@ import time
 from asyncio import QueueEmpty
 from collections import namedtuple
 from functools import cmp_to_key
-from typing import List, Optional, Union, Set, Dict, Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Union
 from warnings import warn
 
 import attrs
 
 import interactions.models as models
-from interactions.client.const import Absent, MISSING, PREMIUM_GUILD_LIMITS
+from interactions.client.const import MISSING, PREMIUM_GUILD_LIMITS, Absent
 from interactions.client.errors import EventLocationNotProvided, NotFound
 from interactions.client.mixins.serialization import DictSerializationMixin
-from interactions.client.utils.attr_converters import optional
-from interactions.client.utils.attr_converters import timestamp_converter
+from interactions.client.utils.attr_converters import (
+    list_converter,
+    optional,
+    timestamp_converter,
+)
 from interactions.client.utils.attr_utils import docs
 from interactions.client.utils.deserialise_app_cmds import deserialize_app_cmds
-from interactions.client.utils.serializer import to_image_data, no_export_meta
-from interactions.models.discord.app_perms import CommandPermissions, ApplicationCommandPermission
+from interactions.client.utils.serializer import no_export_meta, to_image_data
+from interactions.models.discord.app_perms import (
+    ApplicationCommandPermission,
+    CommandPermissions,
+)
 from interactions.models.discord.auto_mod import AutoModRule, BaseAction, BaseTrigger
 from interactions.models.discord.file import UPLOADABLE_TYPE
+from interactions.models.discord.onboarding import Onboarding
 from interactions.models.misc.iterator import AsyncIterator
-from .base import DiscordObject, ClientObject
+
+from .base import ClientObject, DiscordObject
 from .enums import (
-    NSFWLevel,
-    Permissions,
-    SystemChannelFlags,
-    VerificationLevel,
-    DefaultNotificationLevel,
-    ExplicitContentFilterLevel,
-    MFALevel,
-    ChannelType,
-    IntegrationExpireBehaviour,
-    ScheduledEventPrivacyLevel,
-    ScheduledEventType,
     AuditLogEventType,
     AutoModEvent,
     AutoModTriggerType,
+    ChannelType,
+    DefaultNotificationLevel,
+    ExplicitContentFilterLevel,
     ForumLayoutType,
+    ForumSortOrder,
+    IntegrationExpireBehaviour,
+    MFALevel,
+    NSFWLevel,
+    Permissions,
+    ScheduledEventPrivacyLevel,
+    ScheduledEventType,
+    SystemChannelFlags,
+    VerificationLevel,
 )
-from .snowflake import to_snowflake, Snowflake_Type, to_optional_snowflake, to_snowflake_list
+from .snowflake import (
+    Snowflake_Type,
+    to_optional_snowflake,
+    to_snowflake,
+    to_snowflake_list,
+)
 
 if TYPE_CHECKING:
-    from interactions.client.client import Client
     from interactions import InteractionCommand
+    from interactions.client.client import Client
 
 __all__ = (
     "GuildBan",
+    "BulkBanResponse",
     "BaseGuild",
     "GuildWelcome",
     "GuildPreview",
@@ -69,6 +84,34 @@ class GuildBan:
     """The reason for the ban"""
     user: "models.User"
     """The banned user"""
+
+
+@attrs.define(eq=False, order=False, hash=False, kw_only=True)
+class BulkBanResponse(ClientObject):
+    _banned_users: list[Snowflake_Type] = attrs.field(repr=False, converter=to_snowflake_list)
+    """List of user IDs that were successfully banned."""
+    _failed_users: list[Snowflake_Type] = attrs.field(repr=False, converter=to_snowflake_list)
+    """List of user IDs that were not banned."""
+
+    @property
+    def banned_users(self) -> List["models.User | None"]:
+        """List of users that were successfully banned."""
+        return [self.client.cache.get_user(u_id) for u_id in self._banned_users]
+
+    @property
+    def failed_users(self) -> List["models.User | None"]:
+        """List of users that were not banned."""
+        return [self.client.cache.get_user(u_id) for u_id in self._failed_users]
+
+    @property
+    def failed_user_ids(self) -> List[Snowflake_Type]:
+        """List of user IDs that were not banned."""
+        return self._failed_users
+
+    @property
+    def banned_user_ids(self) -> List[Snowflake_Type]:
+        """List of user IDs that were successfully banned."""
+        return self._banned_users
 
 
 @attrs.define(eq=False, order=False, hash=False, kw_only=True)
@@ -223,6 +266,8 @@ class Guild(BaseGuild):
     """A cache of all command permissions for this guild"""
     premium_progress_bar_enabled: bool = attrs.field(repr=False, default=False)
     """True if the guild has the boost progress bar enabled"""
+    safety_alerts_channel_id: Optional[Snowflake_Type] = attrs.field(repr=False, default=None)
+    """The id of the channel where admins and moderators of Community guilds receive safety alerts from Discord."""
 
     _owner_id: Snowflake_Type = attrs.field(repr=False, converter=to_snowflake)
     _channel_ids: Set[Snowflake_Type] = attrs.field(repr=False, factory=set)
@@ -340,7 +385,8 @@ class Guild(BaseGuild):
     @property
     def members(self) -> List["models.Member"]:
         """Returns a list of all members within this guild."""
-        return [self._client.cache.get_member(self.id, m_id) for m_id in self._member_ids]
+        members = (self._client.cache.get_member(self.id, m_id) for m_id in self._member_ids)
+        return [m for m in members if m]
 
     @property
     def premium_subscribers(self) -> List["models.Member"]:
@@ -360,7 +406,7 @@ class Guild(BaseGuild):
     @property
     def roles(self) -> List["models.Role"]:
         """Returns a list of roles associated with this guild."""
-        return [self._client.cache.get_role(r_id) for r_id in self._role_ids]
+        return sorted((r for r_id in self._role_ids if (r := self._client.cache.get_role(r_id))), reverse=True)
 
     @property
     def me(self) -> "models.Member":
@@ -381,6 +427,11 @@ class Guild(BaseGuild):
     def public_updates_channel(self) -> Optional["models.GuildText"]:
         """Returns the channel where server staff receive notices from Discord."""
         return self._client.cache.get_channel(self.public_updates_channel_id)
+
+    @property
+    def safety_alerts_channel(self) -> Optional["models.GuildText"]:
+        """Returns the channel where server staff receive safety alerts from Discord."""
+        return self._client.cache.get_channel(self.safety_alerts_channel_id)
 
     @property
     def emoji_limit(self) -> int:
@@ -507,7 +558,7 @@ class Guild(BaseGuild):
         """
         return self._client.cache.get_member(self.id, self._owner_id)
 
-    async def fetch_channels(self) -> List["models.TYPE_VOICE_CHANNEL"]:
+    async def fetch_channels(self) -> List["models.TYPE_GUILD_CHANNEL"]:
         """
         Fetch this guild's channels.
 
@@ -581,13 +632,14 @@ class Guild(BaseGuild):
             f"Cached {iterator.total_retrieved} members for {self.id} in {time.perf_counter() - start_time:.2f} seconds"
         )
 
-    async def gateway_chunk(self, wait=True, presences=True) -> None:
+    async def gateway_chunk(self, wait: bool = True, presences: bool = True) -> None:
         """
         Trigger a gateway `get_members` event, populating this object with members.
 
         Args:
             wait: Wait for chunking to be completed before continuing
             presences: Do you need presence data for members?
+
         """
         ws = self._client.get_guild_websocket(self.id)
         await ws.request_member_chunks(self.id, limit=0, presences=presences)
@@ -598,7 +650,7 @@ class Guild(BaseGuild):
         """Populates all members of this guild using the REST API."""
         await self.http_chunk()
 
-    async def chunk_guild(self, wait=True, presences=True) -> None:
+    async def chunk_guild(self, wait: bool = True, presences: bool = True) -> None:
         """
         Trigger a gateway `get_members` event, populating this object with members.
 
@@ -745,6 +797,7 @@ class Guild(BaseGuild):
         banner: Absent[Optional[UPLOADABLE_TYPE]] = MISSING,
         rules_channel: Absent[Optional[Union["models.GuildText", Snowflake_Type]]] = MISSING,
         public_updates_channel: Absent[Optional[Union["models.GuildText", Snowflake_Type]]] = MISSING,
+        safety_alerts_channel: Absent[Optional[Union["models.GuildText", Snowflake_Type]]] = MISSING,
         preferred_locale: Absent[Optional[str]] = MISSING,
         premium_progress_bar_enabled: Absent[Optional[bool]] = False,
         # ToDo: Fill in guild features. No idea how this works - https://discord.com/developers/docs/resources/guild#guild-object-guild-features
@@ -771,6 +824,7 @@ class Guild(BaseGuild):
             system_channel_flags: The new settings for the system channel.
             rules_channel: The text channel where your rules and community guidelines are displayed.
             public_updates_channel: The text channel where updates from discord should appear.
+            safety_alerts_channel: The text channel where safety alerts from discord should appear.
             preferred_locale: The new preferred locale of the guild. Must be an ISO 639 code.
             premium_progress_bar_enabled: The status of the Nitro boost bar.
             features: The enabled guild features
@@ -782,9 +836,9 @@ class Guild(BaseGuild):
             name=name,
             description=description,
             verification_level=int(verification_level) if verification_level else MISSING,
-            default_message_notifications=int(default_message_notifications)
-            if default_message_notifications
-            else MISSING,
+            default_message_notifications=(
+                int(default_message_notifications) if default_message_notifications else MISSING
+            ),
             explicit_content_filter=int(explicit_content_filter) if explicit_content_filter else MISSING,
             afk_channel_id=to_snowflake(afk_channel) if afk_channel else MISSING,
             afk_timeout=afk_timeout,
@@ -797,6 +851,7 @@ class Guild(BaseGuild):
             system_channel_flags=int(system_channel_flags) if system_channel_flags else MISSING,
             rules_channel_id=to_snowflake(rules_channel) if rules_channel else MISSING,
             public_updates_channel_id=to_snowflake(public_updates_channel) if public_updates_channel else MISSING,
+            safety_alerts_channel_id=to_snowflake(safety_alerts_channel) if safety_alerts_channel else MISSING,
             preferred_locale=preferred_locale,
             premium_progress_bar_enabled=premium_progress_bar_enabled if premium_progress_bar_enabled else False,
             features=features,
@@ -1011,7 +1066,10 @@ class Guild(BaseGuild):
         category: Union[Snowflake_Type, "models.GuildCategory"] = None,
         nsfw: bool = False,
         rate_limit_per_user: int = 0,
+        default_reaction_emoji: Absent[Union[dict, "models.PartialEmoji", "models.DefaultReaction", str]] = MISSING,
+        available_tags: Absent["list[dict | models.ThreadTag] | dict | models.ThreadTag"] = MISSING,
         layout: ForumLayoutType = ForumLayoutType.NOT_SET,
+        sort_order: Absent[ForumSortOrder] = MISSING,
         reason: Absent[Optional[str]] = MISSING,
     ) -> "models.GuildForum":
         """
@@ -1025,7 +1083,10 @@ class Guild(BaseGuild):
             category: The category this forum channel should be within
             nsfw: Should this forum be marked nsfw
             rate_limit_per_user: The time users must wait between sending messages
+            default_reaction_emoji: The default emoji to react with when creating a thread
+            available_tags: The available tags for this forum channel
             layout: The layout of the forum channel
+            sort_order: The sort order of the forum channel
             reason: The reason for creating this channel
 
         Returns:
@@ -1041,7 +1102,10 @@ class Guild(BaseGuild):
             category=category,
             nsfw=nsfw,
             rate_limit_per_user=rate_limit_per_user,
+            default_reaction_emoji=models.process_default_reaction(default_reaction_emoji),
+            available_tags=list_converter(models.process_thread_tag)(available_tags) if available_tags else MISSING,
             default_forum_layout=layout,
+            default_sort_order=sort_order,
             reason=reason,
         )
 
@@ -1202,7 +1266,7 @@ class Guild(BaseGuild):
         )
 
     async def delete_channel(
-        self, channel: Union["models.TYPE_GUILD_CHANNEL", Snowflake_Type], reason: str = None
+        self, channel: Union["models.TYPE_GUILD_CHANNEL", Snowflake_Type], reason: str | None = None
     ) -> None:
         """
         Delete the given channel, can handle either a snowflake or channel object.
@@ -1234,29 +1298,47 @@ class Guild(BaseGuild):
 
         """
         scheduled_events_data = await self._client.http.list_schedules_events(self.id, with_user_count)
-        return models.ScheduledEvent.from_list(scheduled_events_data, self._client)
+        return [self._client.cache.place_scheduled_event_data(data) for data in scheduled_events_data]
+
+    def get_scheduled_event(self, scheduled_event_id: Snowflake_Type) -> Optional["models.ScheduledEvent"]:
+        """
+        Gets a scheduled event from the cache by id.
+
+        Args:
+            scheduled_event_id: The id of the scheduled event.
+
+        Returns:
+            The scheduled event. If the event does not exist, returns None.
+
+        """
+        event = self._client.cache.get_scheduled_event(scheduled_event_id)
+        return None if event and int(event._guild_id) != self.id else event
 
     async def fetch_scheduled_event(
-        self, scheduled_event_id: Snowflake_Type, with_user_count: bool = False
+        self,
+        scheduled_event_id: Snowflake_Type,
+        with_user_count: bool = False,
+        *,
+        force: bool = False,
     ) -> Optional["models.ScheduledEvent"]:
         """
-        Get a scheduled event by id.
+        Fetches a scheduled event by id.
 
         Args:
             scheduled_event_id: The id of the scheduled event.
             with_user_count: Whether to include the user count in the response.
+            force: If the cache should be ignored, and the event should be fetched from the API
 
         Returns:
             The scheduled event. If the event does not exist, returns None.
 
         """
         try:
-            scheduled_event_data = await self._client.http.get_scheduled_event(
-                self.id, scheduled_event_id, with_user_count
+            return await self._client.cache.fetch_scheduled_event(
+                self.id, scheduled_event_id, with_user_count=with_user_count, force=force
             )
         except NotFound:
             return None
-        return models.ScheduledEvent.from_dict(scheduled_event_data, self._client)
 
     async def create_scheduled_event(
         self,
@@ -1320,7 +1402,7 @@ class Guild(BaseGuild):
         }
 
         scheduled_event_data = await self._client.http.create_scheduled_event(self.id, payload, reason)
-        return models.ScheduledEvent.from_dict(scheduled_event_data, self._client)
+        return self._client.cache.place_scheduled_event_data(scheduled_event_data)
 
     async def create_custom_sticker(
         self,
@@ -1379,6 +1461,17 @@ class Guild(BaseGuild):
         except NotFound:
             return None
         return models.Sticker.from_dict(sticker_data, self._client)
+
+    async def fetch_all_webhooks(self) -> List["models.Webhook"]:
+        """
+        Fetches all the webhooks for this guild.
+
+        Returns:
+            A list of webhook objects.
+
+        """
+        webhooks_data = await self._client.http.get_guild_webhooks(self.id)
+        return models.Webhook.from_list(webhooks_data, self._client)
 
     async def fetch_active_threads(self) -> "models.ThreadList":
         """
@@ -1457,11 +1550,11 @@ class Guild(BaseGuild):
         if name:
             payload["name"] = name
 
-        if permissions:
+        if permissions is not MISSING and permissions is not None:
             payload["permissions"] = str(int(permissions))
 
         if colour := colour or color:
-            payload["color"] = colour.value
+            payload["color"] = colour if isinstance(colour, int) else colour.value
 
         if hoist:
             payload["hoist"] = True
@@ -1684,6 +1777,29 @@ class Guild(BaseGuild):
             delete_message_seconds = delete_message_days * 3600
         await self._client.http.create_guild_ban(self.id, to_snowflake(user), delete_message_seconds, reason=reason)
 
+    async def bulk_ban(
+        self,
+        users: List[Union["models.User", "models.Member", Snowflake_Type]],
+        delete_message_seconds: int = 0,
+        reason: Optional[str] = None,
+    ) -> BulkBanResponse:
+        """
+        Bans a list of users from the guild.
+
+        !!! note
+            You must have the `ban members` permission
+
+        Args:
+            user: The users to ban
+            delete_message_seconds: How many seconds worth of messages to remove
+            reason: The reason for the ban
+
+        """
+        result = await self.client.http.bulk_guild_ban(
+            self.id, [to_snowflake(user) for user in users], delete_message_seconds, reason=reason
+        )
+        return BulkBanResponse.from_dict(result, self.client)
+
     async def fetch_ban(self, user: Union["models.User", "models.Member", Snowflake_Type]) -> Optional[GuildBan]:
         """
         Fetches the ban information for the specified user in the guild. You must have the `ban members` permission.
@@ -1750,6 +1866,7 @@ class Guild(BaseGuild):
 
         Returns:
             The created rule
+
         """
         rule = AutoModRule(
             name=name,
@@ -1770,6 +1887,7 @@ class Guild(BaseGuild):
 
         Returns:
             A list of auto moderation rules
+
         """
         data = await self._client.http.get_auto_moderation_rules(self.id)
         return [AutoModRule.from_dict(d, self._client) for d in data]
@@ -1781,6 +1899,7 @@ class Guild(BaseGuild):
         Args:
             rule: The rule to delete
             reason: The reason for deleting this rule
+
         """
         await self._client.http.delete_auto_moderation_rule(self.id, to_snowflake(rule), reason=reason)
 
@@ -1817,6 +1936,7 @@ class Guild(BaseGuild):
 
         Returns:
             The updated rule
+
         """
         if trigger:
             _data = trigger.to_dict()
@@ -1856,7 +1976,7 @@ class Guild(BaseGuild):
         """
         await self._client.http.remove_guild_ban(self.id, to_snowflake(user), reason=reason)
 
-    async def fetch_widget_image(self, style: str = None) -> str:
+    async def fetch_widget_image(self, style: str | None = None) -> str:
         """
         Fetch a guilds widget image.
 
@@ -1968,6 +2088,16 @@ class Guild(BaseGuild):
         regions_data = await self._client.http.get_guild_voice_regions(self.id)
         return models.VoiceRegion.from_list(regions_data)
 
+    async def fetch_onboarding(self) -> Onboarding:
+        """
+        Fetches the guild's onboarding settings.
+
+        Returns:
+            The guild's onboarding settings.
+
+        """
+        return Onboarding.from_dict(await self._client.http.get_guild_onboarding(self.id), self._client)
+
     @property
     def gui_sorted_channels(self) -> list["models.TYPE_GUILD_CHANNEL"]:
         """Return this guilds channels sorted by their gui positions"""
@@ -1988,6 +2118,7 @@ class Guild(BaseGuild):
 
         Returns:
             The gui position of the channel.
+
         """
         if not self._channel_gui_positions:
             self._calculate_gui_channel_positions()
@@ -2001,6 +2132,7 @@ class Guild(BaseGuild):
 
         Returns:
             The list of channels in this guild, sorted by their GUI position.
+
         """
         # sorting is based on this https://github.com/discord/discord-api-docs/issues/4613#issuecomment-1059997612
         sort_map = {

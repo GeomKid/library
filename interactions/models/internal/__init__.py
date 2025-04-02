@@ -11,18 +11,21 @@ from .annotations import (
 )
 from .callback import CallbackObject
 from .active_voice_state import ActiveVoiceState
+from .auto_defer import AutoDefer  # purposely out of order to make sure auto_defer comes out as the deco
 from .application_commands import (
     application_commands_to_dict,
     auto_defer,
     CallbackType,
     component_callback,
     ComponentCommand,
+    contexts,
     context_menu,
     user_context_menu,
     message_context_menu,
     ContextMenu,
     global_autocomplete,
     GlobalAutoComplete,
+    integration_types,
     InteractionCommand,
     LocalisedDesc,
     LocalisedName,
@@ -41,7 +44,6 @@ from .application_commands import (
     subcommand,
     sync_needed,
 )
-from .auto_defer import AutoDefer
 from .checks import dm_only, guild_only, has_any_role, has_id, has_role, is_owner
 from .command import BaseCommand, check, cooldown, max_concurrency
 from .context import (
@@ -58,6 +60,7 @@ from .context import (
 from .converters import (
     BaseChannelConverter,
     ChannelConverter,
+    ConsumeRest,
     CustomEmojiConverter,
     DMChannelConverter,
     DMConverter,
@@ -100,7 +103,7 @@ from .listener import listen, Listener
 from .protocols import Converter
 from .extension import Extension
 from .wait import Wait
-from .tasks import BaseTrigger, DateTrigger, IntervalTrigger, OrTrigger, Task, TimeTrigger
+from .tasks import BaseTrigger, DateTrigger, IntervalTrigger, OrTrigger, Task, TimeTrigger, CronTrigger
 
 __all__ = (
     "ActiveVoiceState",
@@ -121,15 +124,18 @@ __all__ = (
     "component_callback",
     "ComponentCommand",
     "ComponentContext",
+    "contexts",
     "context_menu",
     "user_context_menu",
     "message_context_menu",
+    "ConsumeRest",
     "ContextMenu",
     "ContextMenuContext",
     "Converter",
     "cooldown",
     "Cooldown",
     "CooldownSystem",
+    "CronTrigger",
     "SlidingWindowSystem",
     "ExponentialBackoffSystem",
     "LeakyBucketSystem",
@@ -159,6 +165,7 @@ __all__ = (
     "has_id",
     "has_role",
     "IDConverter",
+    "integration_types",
     "InteractionCommand",
     "InteractionContext",
     "IntervalTrigger",

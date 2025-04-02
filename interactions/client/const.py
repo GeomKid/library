@@ -32,14 +32,19 @@ Attributes:
     T TypeVar: A type variable used for generic typing.
     Absent Union[T, Missing]: A type hint for a value that may be MISSING.
 
+    CLIENT_FEATURE_FLAGS dict: A dict of feature flags that can be enabled or disabled for the client.
+    has_feature_flag Callable[[str], bool]: A function that returns whether a feature flag is enabled.
+
 """
+
 import inspect
 import logging
 import os
 import sys
 from collections import defaultdict
 from importlib.metadata import version as _v, PackageNotFoundError
-from typing import TypeVar, Union, Callable, Coroutine
+import typing_extensions
+from typing import TypeVar, Union, Callable, Coroutine, ClassVar, TYPE_CHECKING
 
 __all__ = (
     "__version__",
@@ -75,9 +80,14 @@ __all__ = (
     "Absent",
     "T",
     "T_co",
+    "ClientT",
     "LIB_PATH",
     "RECOVERABLE_WEBSOCKET_CLOSE_CODES",
     "NON_RESUMABLE_WEBSOCKET_CLOSE_CODES",
+    "CLIENT_FEATURE_FLAGS",
+    "has_client_feature",
+    "POLL_MAX_ANSWERS",
+    "POLL_MAX_DURATION_HOURS",
 )
 
 _ver_info = sys.version_info
@@ -124,9 +134,12 @@ EMBED_MAX_FIELDS = 25
 EMBED_TOTAL_MAX = 6000
 EMBED_FIELD_VALUE_LENGTH = 1024
 
+POLL_MAX_ANSWERS = 10
+POLL_MAX_DURATION_HOURS = 768
+
 
 class Singleton(type):
-    _instances = {}
+    _instances: ClassVar[dict] = {}
 
     def __call__(self, *args, **kwargs) -> "Singleton":
         if self not in self._instances:
@@ -178,8 +191,7 @@ class Missing(Sentinel):
         return False
 
 
-class MentionPrefix(Sentinel):
-    ...
+class MentionPrefix(Sentinel): ...
 
 
 GLOBAL_SCOPE = GlobalScope()
@@ -194,6 +206,18 @@ PREMIUM_GUILD_LIMITS = defaultdict(
         3: {"emoji": 250, "stickers": 60, "bitrate": 384000, "filesize": 104857600},
     },
 )
+
+CLIENT_FEATURE_FLAGS = {
+    "FOLLOWUP_INTERACTIONS_FOR_IMAGES": False,  # Experimental fix to bypass Discord's broken image proxy
+}
+
+
+def has_client_feature(feature: str) -> bool:
+    """Checks if a feature is enabled for the client."""
+    if feature.upper() not in CLIENT_FEATURE_FLAGS:
+        get_logger().warning(f"Unknown feature {feature!r} - Known features: {list(CLIENT_FEATURE_FLAGS)}")
+        return False
+    return CLIENT_FEATURE_FLAGS[feature.upper()]
 
 
 GUILD_WELCOME_MESSAGES = (
@@ -217,8 +241,59 @@ T_co = TypeVar("T_co", covariant=True)
 Absent = Union[T, Missing]
 AsyncCallable = Callable[..., Coroutine]
 
+if TYPE_CHECKING:
+    from interactions import Client
+
+    ClientT = typing_extensions.TypeVar("ClientT", bound=Client, default=Client, covariant=True)
+else:
+    ClientT = TypeVar("ClientT")
+
 LIB_PATH = os.sep.join(__file__.split(os.sep)[:-2])
 """The path to the library folder."""
 
-RECOVERABLE_WEBSOCKET_CLOSE_CODES = (4000, 4001, 4002, 4003, 4005, 4007, 4008, 4009)
-NON_RESUMABLE_WEBSOCKET_CLOSE_CODES = (1000, 4007)
+# fmt: off
+RECOVERABLE_WEBSOCKET_CLOSE_CODES = (  # Codes that are recoverable, and the bot will reconnect
+    1000,  # Normal closure
+    1001,  # Server going away
+    1003,  # Unsupported Data
+    1005,  # No status code
+    1006,  # Abnormal closure
+    1008,  # Policy Violation
+    1009,  # Message too big
+    1011,  # Server error
+    1012,  # Server is restarting
+    1014,  # Handshake failed
+    1015,  # TLS error
+    4000,  # Unknown error
+    4001,  # Unknown opcode
+    4002,  # Decode error
+    4003,  # Not authenticated
+    4005,  # Already authenticated
+    4007,  # Invalid seq
+    4008,  # Rate limited
+    4009,  # Session timed out
+)
+NON_RESUMABLE_WEBSOCKET_CLOSE_CODES = (  # Codes that are recoverable, but the bot won't be able to resume the session
+    1000,  # Normal closure
+    1003,  # Unsupported Data
+    1008,  # Policy Violation
+    1009,  # Message too big
+    1011,  # Server error
+    1012,  # Server is restarting
+    1014,  # Handshake failed
+    1015,  # TLS error
+    4007,  # Invalid seq
+)
+# Any close code not in the above two tuples is a non-recoverable close code, and will result in the bot shutting down
+# fmt: on
+
+
+# Sanity check the above constants - only useful during development, but doesn't hurt to leave in
+try:
+    assert set(NON_RESUMABLE_WEBSOCKET_CLOSE_CODES).issubset(set(RECOVERABLE_WEBSOCKET_CLOSE_CODES))
+except AssertionError as e:
+    # find the difference between the two sets
+    diff = set(NON_RESUMABLE_WEBSOCKET_CLOSE_CODES) - set(RECOVERABLE_WEBSOCKET_CLOSE_CODES)
+    raise RuntimeError(
+        f"NON_RESUMABLE_WEBSOCKET_CLOSE_CODES contains codes that are not in RECOVERABLE_WEBSOCKET_CLOSE_CODES: {diff}"
+    ) from e

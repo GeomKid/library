@@ -80,8 +80,9 @@ class MemberRequests(CanRequest):
         roles: list["Snowflake_Type"] | None = None,
         mute: bool | None = None,
         deaf: bool | None = None,
-        channel_id: "Snowflake_Type | None" = None,
+        channel_id: "Snowflake_Type | MISSING" = MISSING,
         communication_disabled_until: str | datetime | Timestamp | None | Missing = MISSING,
+        flags: int | Missing = MISSING,
         reason: str | None = None,
     ) -> discord_typings.GuildMemberData:
         """
@@ -96,6 +97,7 @@ class MemberRequests(CanRequest):
             deaf: Whether the user is deafened in voice channels
             channel_id: id of channel to move user to (if they are connected to voice)
             communication_disabled_until: 	when the user's timeout will expire and the user will be able to communicate in the guild again
+            flags: Represents the guild member flags
             reason: An optional reason for the audit log
 
         Returns:
@@ -109,14 +111,17 @@ class MemberRequests(CanRequest):
             "roles": roles,
             "mute": mute,
             "deaf": deaf,
-            "channel_id": int(channel_id) if channel_id else None,
         }
         payload = dict_filter_none(payload)
+        if channel_id is not MISSING:
+            payload["channel_id"] = channel_id
 
         if not isinstance(nickname, Missing):
             payload["nick"] = nickname
         if not isinstance(communication_disabled_until, Missing):
             payload["communication_disabled_until"] = communication_disabled_until
+        if not isinstance(flags, Missing):
+            payload["flags"] = flags
 
         result = await self.request(
             Route("PATCH", "/guilds/{guild_id}/members/{user_id}", guild_id=guild_id, user_id=user_id),

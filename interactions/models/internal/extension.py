@@ -2,6 +2,7 @@ import asyncio
 import inspect
 import typing
 from typing import Awaitable, Dict, List, TYPE_CHECKING, Callable, Coroutine, Optional
+import re
 
 import interactions.models.internal as models
 import interactions.api.events as events
@@ -22,7 +23,7 @@ __all__ = ("Extension",)
 
 class Extension:
     """
-    A class that allows you to separate your commands and listeners into separate files. Skins require an entrypoint in the same file called `setup`, this function allows client to load the Extension.
+    A class that allows you to separate your commands and listeners into separate files. Extensions require an entrypoint in the same file called `setup`, this function allows client to load the Extension.
 
     ??? Hint "Example Usage:"
         ```python
@@ -46,7 +47,7 @@ class Extension:
 
     """
 
-    bot: "Client"
+    _bot: "Client"
     name: str
     extension_name: str
     description: str
@@ -76,9 +77,12 @@ class Extension:
     def __new__(cls, bot: "Client", *args, **kwargs) -> "Extension":
         instance = super().__new__(cls)
         instance.bot = bot
-        instance.client = bot
-
         instance.name = cls.__name__
+
+        if instance.name in bot.ext:
+            raise ValueError(f"An extension with the name {instance.name} is already loaded!")
+
+        instance.extension_name = inspect.getmodule(instance).__name__
         instance.extension_checks = []
         instance.extension_prerun = []
         instance.extension_postrun = []
@@ -110,16 +114,15 @@ class Extension:
 
             elif isinstance(val, models.Listener):
                 val.extension = instance
-                val = wrap_partial(val, instance)
+                val = val.copy_with_binding(instance)
                 bot.add_listener(val)  # type: ignore
                 instance._listeners.append(val)
             elif isinstance(val, models.GlobalAutoComplete):
                 val.extension = instance
-                val = wrap_partial(val, instance)
+                val = val.copy_with_binding(instance)
                 bot.add_global_autocomplete(val)
         bot.dispatch(events.ExtensionCommandParse(extension=instance, callables=callables))
 
-        instance.extension_name = inspect.getmodule(instance).__name__
         instance.bot.ext[instance.name] = instance
 
         if hasattr(instance, "async_start"):
@@ -136,6 +139,22 @@ class Extension:
         return self.name
 
     @property
+    def bot(self) -> "Client":
+        return self._bot
+
+    @bot.setter
+    def bot(self, value: "Client") -> None:
+        self._bot = value
+
+    @property
+    def client(self) -> "Client":
+        return self._bot
+
+    @client.setter
+    def client(self, value: "Client") -> None:
+        self._bot = value
+
+    @property
     def commands(self) -> List["BaseCommand"]:
         """Get the commands from this Extension."""
         return self._commands
@@ -150,12 +169,20 @@ class Extension:
         for func in self._commands:
             if isinstance(func, models.ModalCommand):
                 for listener in func.listeners:
-                    # noinspection PyProtectedMember
-                    self.bot._modal_callbacks.pop(listener)
+                    if isinstance(listener, re.Pattern):
+                        # noinspection PyProtectedMember
+                        self.bot._regex_modal_callbacks.pop(listener)
+                    else:
+                        # noinspection PyProtectedMember
+                        self.bot._modal_callbacks.pop(listener)
             elif isinstance(func, models.ComponentCommand):
                 for listener in func.listeners:
-                    # noinspection PyProtectedMember
-                    self.bot._component_callbacks.pop(listener)
+                    if isinstance(listener, re.Pattern):
+                        # noinspection PyProtectedMember
+                        self.bot._regex_component_callbacks.pop(listener)
+                    else:
+                        # noinspection PyProtectedMember
+                        self.bot._component_callbacks.pop(listener)
             elif isinstance(func, models.InteractionCommand):
                 for scope in func.scopes:
                     if self.bot.interactions_by_scope.get(scope):

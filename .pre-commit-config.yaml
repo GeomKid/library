@@ -1,6 +1,6 @@
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v4.4.0
+    rev: v4.6.0
     hooks:
     - id: requirements-txt-fixer
       name: Requirements
@@ -29,13 +29,14 @@ repos:
       name: TOML Structure
     - id: check-merge-conflict
       name: Merge Conflicts
-  - repo: https://github.com/charliermarsh/ruff-pre-commit
-    rev: 'v0.0.261'
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: 'v0.4.3'
     hooks:
       - id: ruff
         args: [--fix, --exit-non-zero-on-fix]
+        language: python
   - repo: https://github.com/psf/black
-    rev: 23.3.0
+    rev: 24.4.2
     hooks:
       - id: black
         name: Black Formatting
@@ -48,6 +49,9 @@ repos:
 #        name: isort Formatting
 #        language: python
 #        types: [file, python]
+
+default_language_version:
+  python: python3.10
 ci:
   autoupdate_branch: "unstable"
   autofix_prs: true

@@ -1,6 +1,7 @@
 from typing import TYPE_CHECKING, Any, Iterable, Optional, Union
 
 import interactions.models as models
+import interactions.models.discord
 from interactions.models.discord.enums import MessageFlags
 
 if TYPE_CHECKING:
@@ -9,6 +10,7 @@ if TYPE_CHECKING:
     from interactions.models.discord.components import BaseComponent
     from interactions.models.discord.embed import Embed
     from interactions.models.discord.message import AllowedMentions, Message, MessageReference
+    from interactions.models.discord.poll import Poll
     from interactions.models.discord.sticker import Sticker
     from interactions.models.discord.snowflake import Snowflake_Type
 
@@ -46,6 +48,9 @@ class SendMixin:
         silent: bool = False,
         flags: Optional[Union[int, "MessageFlags"]] = None,
         delete_after: Optional[float] = None,
+        nonce: Optional[str | int] = None,
+        enforce_nonce: bool = False,
+        poll: "Optional[Poll | dict]" = None,
         **kwargs: Any,
     ) -> "Message":
         """
@@ -66,6 +71,11 @@ class SendMixin:
             silent: Should this message be sent without triggering a notification.
             flags: Message flags to apply.
             delete_after: Delete message after this many seconds.
+            nonce: Used to verify a message was sent. Can be up to 25 characters.
+            enforce_nonce: If enabled and nonce is present, it will be checked for uniqueness in the past few minutes. \
+                If another message was created by the same author with the same nonce, that message will be returned \
+                and no new message will be created.
+            poll: A poll.
 
         Returns:
             New message object that was sent.
@@ -82,6 +92,21 @@ class SendMixin:
                 flags = MessageFlags(flags)
             flags = flags | MessageFlags.SILENT
 
+        if (
+            files
+            and (
+                isinstance(files, Iterable)
+                and any(isinstance(file, interactions.models.discord.message.Attachment) for file in files)
+            )
+            or isinstance(files, interactions.models.discord.message.Attachment)
+        ):
+            raise ValueError(
+                "Attachments are not files. Attachments only contain metadata about the file, not the file itself - to send an attachment, you need to download it first. Check Attachment.url"
+            )
+
+        if enforce_nonce and not nonce:
+            raise ValueError("You must provide a nonce to use enforce_nonce.")
+
         message_payload = models.discord.message.process_message_payload(
             content=content,
             embeds=embeds or embed,
@@ -91,6 +116,9 @@ class SendMixin:
             reply_to=reply_to,
             tts=tts,
             flags=flags,
+            nonce=nonce,
+            enforce_nonce=enforce_nonce,
+            poll=poll,
             **kwargs,
         )
 
@@ -98,5 +126,8 @@ class SendMixin:
         if message_data:
             message = self.client.cache.place_message_data(message_data)
             if delete_after:
-                await message.delete(delay=delete_after)
+                if kwargs.get("pass_self_into_delete"):  # hack to pass in interaction/hybrid context
+                    await message.delete(delay=delete_after, context=self)
+                else:
+                    await message.delete(delay=delete_after)
             return message

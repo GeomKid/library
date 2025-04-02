@@ -3,9 +3,9 @@ hide:
   - navigation
   - toc
   - feedback
+search:
+  exclude: true
 ---
-!!! danger "Remember"
-    These docs are not completed. Please do not panic if something is missing or inaccurate.
 
 We hope this documentation is helpful for you, but don't just ++ctrl+c++ and ++ctrl+v++.
 
@@ -34,7 +34,7 @@ In addition to core functionality, interactions.py provides a range of optional 
 
 So the base library doesn't do what you want? No problem! With builtin extensions, you are able to extend the functionality of the library. And if none of those pique your interest, there are a myriad of other extension libraries available.
 
-Just type `bot.load("extension")`
+Just type `bot.load_extension("extension")`
 
 ---
 

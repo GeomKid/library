@@ -1,4 +1,9 @@
-# Creating Context Menus
+---
+search:
+  boost: 3
+---
+
+# Context Menus
 
 Context menus are interactions under the hood. Defining them is very similar.
 Context menus work off `ctx.target` which contains the object the user interacted with.

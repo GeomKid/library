@@ -1,7 +1,7 @@
 from enum import Enum, EnumMeta, IntEnum, IntFlag
 from functools import reduce
 from operator import or_
-from typing import Iterator, Tuple, TypeVar, Type
+from typing import Iterator, Tuple, TypeVar, Type, Optional
 
 from interactions.client.const import get_logger
 
@@ -16,10 +16,13 @@ __all__ = (
     "ChannelType",
     "CommandType",
     "ComponentType",
+    "ContextType",
     "DefaultNotificationLevel",
     "ExplicitContentFilterLevel",
     "ForumLayoutType",
+    "ForumSortOrder",
     "IntegrationExpireBehaviour",
+    "IntegrationType",
     "Intents",
     "InteractionPermissionTypes",
     "InteractionType",
@@ -31,8 +34,11 @@ __all__ = (
     "MessageType",
     "MFALevel",
     "NSFWLevel",
+    "OnboardingMode",
+    "OnboardingPromptType",
     "OverwriteType",
     "Permissions",
+    "PollLayoutType",
     "PremiumTier",
     "PremiumType",
     "ScheduledEventPrivacyLevel",
@@ -102,9 +108,10 @@ class DistinctFlag(EnumMeta):
 
     def __call__(cls, value, names=None, *, module=None, qualname=None, type=None, start=1) -> "DistinctFlag":
         # To automatically convert string values into ints (eg for permissions)
+        kwargs = {"names": names} if names else {}
         try:
             int_value = int(value)
-            return super().__call__(int_value, names, module=module, qualname=qualname, type=type, start=start)
+            return super().__call__(int_value, module=module, qualname=qualname, type=type, start=start, **kwargs)
         except (TypeError, ValueError):
             return _return_cursed_enum(cls, value)
 
@@ -198,12 +205,15 @@ class Intents(DiscordIntFlag):  # type: ignore
     GUILD_SCHEDULED_EVENTS = 1 << 16
     AUTO_MODERATION_CONFIGURATION = 1 << 20
     AUTO_MODERATION_EXECUTION = 1 << 21
+    GUILD_MESSAGE_POLLS = 1 << 24
+    DIRECT_MESSAGE_POLLS = 1 << 25
 
     # Shortcuts/grouping/aliases
     MESSAGES = GUILD_MESSAGES | DIRECT_MESSAGES
     REACTIONS = GUILD_MESSAGE_REACTIONS | DIRECT_MESSAGE_REACTIONS
     TYPING = GUILD_MESSAGE_TYPING | DIRECT_MESSAGE_TYPING
     AUTO_MOD = AUTO_MODERATION_CONFIGURATION | AUTO_MODERATION_EXECUTION
+    POLLS = GUILD_MESSAGE_POLLS | DIRECT_MESSAGE_POLLS
 
     PRIVILEGED = GUILD_PRESENCES | GUILD_MEMBERS | MESSAGE_CONTENT
     NON_PRIVILEGED = AntiFlag(PRIVILEGED)
@@ -226,14 +236,17 @@ class Intents(DiscordIntFlag):  # type: ignore
         guild_voice_states=False,
         guild_presences=False,
         guild_messages=False,
+        guild_message_polls=False,
         guild_message_reactions=False,
         guild_message_typing=False,
         direct_messages=False,
+        direct_message_polls=False,
         direct_message_reactions=False,
         direct_message_typing=False,
         message_content=False,
         guild_scheduled_events=False,
         messages=False,
+        polls=False,
         reactions=False,
         typing=False,
         privileged=False,
@@ -339,6 +352,8 @@ class PremiumType(CursedIntEnum):
     """Using Nitro Classic"""
     NITRO = 2
     """Full Nitro membership"""
+    NITRO_BASIC = 3
+    """Basic Nitro membership"""
 
 
 class MessageType(CursedIntEnum):
@@ -379,6 +394,12 @@ class MessageType(CursedIntEnum):
     STAGE_SPEAKER = 29
     STAGE_TOPIC = 31
     GUILD_APPLICATION_PREMIUM_SUBSCRIPTION = 32
+    GUILD_INCIDENT_ALERT_MODE_ENABLED = 36
+    GUILD_INCIDENT_ALERT_MODE_DISABLED = 37
+    GUILD_INCIDENT_REPORT_RAID = 38
+    GUILD_INCIDENT_REPORT_FALSE_ALARM = 39
+    PURCHASE_NOTIFICATION = 44
+    POLL_RESULT = 46
 
     @classmethod
     def deletable(cls) -> Tuple["MessageType", ...]:
@@ -392,6 +413,10 @@ class MessageType(CursedIntEnum):
             cls.USER_PREMIUM_GUILD_SUBSCRIPTION_TIER_2,
             cls.USER_PREMIUM_GUILD_SUBSCRIPTION_TIER_3,
             cls.CHANNEL_FOLLOW_ADD,
+            cls.GUILD_DISCOVERY_DISQUALIFIED,
+            cls.GUILD_DISCOVERY_REQUALIFIED,
+            cls.GUILD_DISCOVERY_GRACE_PERIOD_INITIAL_WARNING,
+            cls.GUILD_DISCOVERY_GRACE_PERIOD_FINAL_WARNING,
             cls.THREAD_CREATED,
             cls.REPLY,
             cls.APPLICATION_COMMAND,
@@ -404,6 +429,13 @@ class MessageType(CursedIntEnum):
             cls.STAGE_END,
             cls.STAGE_SPEAKER,
             cls.STAGE_TOPIC,
+            cls.GUILD_APPLICATION_PREMIUM_SUBSCRIPTION,
+            cls.GUILD_INCIDENT_ALERT_MODE_ENABLED,
+            cls.GUILD_INCIDENT_ALERT_MODE_DISABLED,
+            cls.GUILD_INCIDENT_REPORT_RAID,
+            cls.GUILD_INCIDENT_REPORT_FALSE_ALARM,
+            cls.PURCHASE_NOTIFICATION,
+            cls.POLL_RESULT,
         )
 
 
@@ -417,6 +449,8 @@ class EmbedType(Enum):
     ARTICLE = "article"
     LINK = "link"
     AUTOMOD_MESSAGE = "auto_moderation_message"
+    AUTOMOD_NOTIFICATION = "auto_moderation_notification"
+    POLL_RESULT = "poll_result"
 
 
 class MessageActivityType(CursedIntEnum):
@@ -457,6 +491,11 @@ class MessageFlags(DiscordIntFlag):  # type: ignore
     """This message contains a abusive website link, pops up a warning when clicked"""
     SILENT = 1 << 12
     """This message should not trigger push or desktop notifications"""
+    VOICE_MESSAGE = 1 << 13
+    """This message is a voice message"""
+
+    SUPPRESS_NOTIFICATIONS = SILENT
+    """Alias for :attr:`SILENT`"""
 
     # Special members
     NONE = 0
@@ -559,6 +598,10 @@ class Permissions(DiscordIntFlag):  # type: ignore
     """Allows for creating emojis, stickers, and soundboard sounds"""
     USE_EXTERNAL_SOUNDS = 1 << 45
     """Allows the usage of custom sounds from other servers"""
+    SEND_VOICE_MESSAGES = 1 << 46
+    """Allows for sending audio messages"""
+    SEND_POLLS = 1 << 49
+    """Allows sending polls"""
 
     # Shortcuts/grouping/aliases
     REQUIRES_MFA = (
@@ -607,6 +650,8 @@ class ChannelType(CursedIntEnum):
     """Voice channel for hosting events with an audience"""
     GUILD_FORUM = 15
     """A Forum channel"""
+    GUILD_MEDIA = 16
+    """Channel that can only contain threads, similar to `GUILD_FORUM` channels"""
 
     @property
     def guild(self) -> bool:
@@ -638,6 +683,21 @@ class ComponentType(CursedIntEnum):
     """Select menu for picking from mentionable objects"""
     CHANNEL_SELECT = 8
     """Select menu for picking from channels"""
+
+
+class IntegrationType(CursedIntEnum):
+    """The types of installation contexts supported by discord."""
+
+    GUILD_INSTALL = 0
+    USER_INSTALL = 1
+
+
+class ContextType(CursedIntEnum):
+    """The context of where an interaction can be used."""
+
+    GUILD = 0
+    BOT_DM = 1
+    PRIVATE_CHANNEL = 2
 
 
 class CommandType(CursedIntEnum):
@@ -683,6 +743,8 @@ class ButtonStyle(CursedIntEnum):
     """red"""
     LINK = 5
     """url button"""
+    PREMIUM = 6
+    """premium button"""
 
     # Aliases
     BLUE = 1
@@ -700,6 +762,22 @@ class MentionType(str, Enum):
     EVERYONE = "everyone"
     ROLES = "roles"
     USERS = "users"
+
+
+class OnboardingMode(CursedIntEnum):
+    """Defines the criteria used to satisfy Onboarding constraints that are required for enabling."""
+
+    ONBOARDING_DEFAULT = 0
+    """Counts only Default Channels towards constraints"""
+    ONBOARDING_ADVANCED = 1
+    """Counts Default Channels and Questions towards constraints"""
+
+
+class OnboardingPromptType(CursedIntEnum):
+    """Types of Onboarding prompts."""
+
+    MULTIPLE_CHOICE = 0
+    DROPDOWN = 1
 
 
 class OverwriteType(CursedIntEnum):
@@ -788,6 +866,12 @@ class SystemChannelFlags(DiscordIntFlag):
 class ChannelFlags(DiscordIntFlag):
     PINNED = 1 << 1
     """ Thread is pinned to the top of its parent forum channel """
+    REQUIRE_TAG = 1 << 4
+    """Whether a tag is required to be specified when creating a thread in a Guild Forum or Media channel."""
+    CLYDE_THREAD = 1 << 8
+    """This thread was created by Clyde"""
+    HIDE_MEDIA_DOWNLOAD_OPTIONS = 1 << 15
+    """when set hides the embedded media download options. Available only for media channels"""
 
     # Special members
     NONE = 0
@@ -962,6 +1046,7 @@ class AuditLogEventType(CursedIntEnum):
     AUTO_MODERATION_BLOCK_MESSAGE = 143
     AUTO_MODERATION_FLAG_TO_CHANNEL = 144
     AUTO_MODERATION_USER_COMMUNICATION_DISABLED = 145
+    AUTO_MODERATION_QUARANTINE = 146
     CREATOR_MONETIZATION_REQUEST_CREATED = 150
     CREATOR_MONETIZATION_TERMS_ACCEPTED = 151
     ROLE_PROMPT_CREATE = 160
@@ -972,8 +1057,15 @@ class AuditLogEventType(CursedIntEnum):
     ONBOARDING_UPDATE = 167
     GUILD_HOME_FEATURE_ITEM = 171
     GUILD_HOME_FEATURE_ITEM_UPDATE = 172
+    BLOCKED_PHISHING_LINK = 180
     SERVER_GUIDE_CREATE = 190
     SERVER_GUIDE_UPDATE = 191
+    VOICE_CHANNEL_STATUS_CREATE = 192
+    VOICE_CHANNEL_STATUS_DELETE = 193
+    CLYDE_AI_PROFILE_UPDATE = 194
+    GUILD_SCHEDULED_EVENT_EXCEPTION_CREATE = 200
+    GUILD_SCHEDULED_EVENT_EXCEPTION_UPDATE = 201
+    GUILD_SCHEDULED_EVENT_EXCEPTION_DELETE = 202
 
 
 class AutoModTriggerType(CursedIntEnum):
@@ -1034,3 +1126,41 @@ class ForumLayoutType(CursedIntEnum):
     NOT_SET = 0
     LIST = 1
     GALLERY = 2
+
+
+class ForumSortOrder(CursedIntEnum):
+    """The order of a forum channel."""
+
+    LATEST_ACTIVITY = 0
+    CREATION_DATE = 1
+
+    @classmethod
+    def converter(cls, value: Optional[int]) -> "ForumSortOrder":
+        return None if value is None else cls(value)
+
+
+class EntitlementType(CursedIntEnum):
+    """The type of entitlement."""
+
+    PURCHASE = 1
+    """Entitlement was purchased by user"""
+    PREMIUM_SUBSCRIPTION = 2
+    """Entitlement for Discord Nitro subscription"""
+    DEVELOPER_GIFT = 3
+    """Entitlement was gifted by developer"""
+    TEST_MODE_PURCHASE = 4
+    """Entitlement was purchased by a dev in application test mode"""
+    FREE_PURCHASE = 5
+    """Entitlement was granted when the SKU was free"""
+    USER_GIFT = 6
+    """Entitlement was gifted by another user"""
+    PREMIUM_PURCHASE = 7
+    """Entitlement was claimed by user for free as a Nitro Subscriber"""
+    APPLICATION_SUBSCRIPTION = 8
+    """Entitlement was purchased as an app subscription"""
+
+
+class PollLayoutType(CursedIntEnum):
+    """The layout of a poll."""
+
+    DEFAULT = 1

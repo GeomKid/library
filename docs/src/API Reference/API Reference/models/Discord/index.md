@@ -1,3 +1,8 @@
+---
+search:
+  exclude: true
+---
+
 # Discord Models Index
 
 - [Activity](activity)
@@ -9,6 +14,7 @@
 - [Components](components)
 - [Embed](embed)
 - [Emoji](emoji)
+- [Entitlement](entitlement)
 - [Enums](enums)
 - [File](file)
 - [Guild](guild)
@@ -16,6 +22,7 @@
 - [Invite](invite)
 - [Message](message)
 - [Modals](modals)
+- [Poll](poll)
 - [Reaction](reaction)
 - [Role](role)
 - [Scheduled event](scheduled_event)

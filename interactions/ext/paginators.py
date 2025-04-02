@@ -106,6 +106,8 @@ class Paginator:
     """Show a button which will call the `callback`"""
     show_select_menu: bool = attrs.field(repr=False, default=False)
     """Should a select menu be shown for navigation"""
+    hide_buttons_on_stop: bool = attrs.field(repr=False, default=False)
+    """Should the paginator buttons be hidden instead of disabled after stop or timeout"""
 
     first_button_emoji: Optional[Union["PartialEmoji", dict, str]] = attrs.field(
         repr=False, default="⏮️", metadata=export_converter(process_emoji)
@@ -181,6 +183,7 @@ class Paginator:
 
         Returns:
             A paginator system
+
         """
         return cls(client, pages=list(embeds), timeout_interval=timeout)
 
@@ -207,6 +210,7 @@ class Paginator:
 
         Returns:
             A paginator system
+
         """
         content_pages = textwrap.wrap(
             content,
@@ -241,15 +245,18 @@ class Paginator:
 
         Returns:
             A paginator system
+
         """
         pages = []
         page = ""
         for entry in content:
+            if len(entry) > page_size:
+                continue
             if len(page) + len(f"\n{entry}") <= page_size:
                 page += f"{entry}\n"
             else:
                 pages.append(Page(page, prefix=prefix, suffix=suffix))
-                page = ""
+                page = f"{entry}\n"
         if page != "":
             pages.append(Page(page, prefix=prefix, suffix=suffix))
         return cls(client, pages=pages, timeout_interval=timeout)
@@ -265,17 +272,21 @@ class Paginator:
             A list of ActionRows
 
         """
+        if disable and self.hide_buttons_on_stop:
+            return []
+
         output = []
 
         if self.show_select_menu:
             current = self.pages[self.page_index]
+            lower_index = max(0, min(len(self.pages) - 25, self.page_index - 12))
             output.append(
                 StringSelectMenu(
                     *(
                         StringSelectOption(
                             label=f"{i+1} {p.get_summary if isinstance(p, Page) else p.title}", value=str(i)
                         )
-                        for i, p in enumerate(self.pages)
+                        for i, p in enumerate(self.pages[lower_index : lower_index + 25], start=lower_index)
                     ),
                     custom_id=f"{self._uuid}|select",
                     placeholder=f"{self.page_index+1} {current.get_summary if isinstance(current, Page) else current.title}",
@@ -352,41 +363,45 @@ class Paginator:
             "components": [c.to_dict() for c in self.create_components()],
         }
 
-    async def send(self, ctx: BaseContext) -> Message:
+    async def send(self, ctx: BaseContext, **kwargs) -> Message:
         """
         Send this paginator.
 
         Args:
             ctx: The context to send this paginator with
+            **kwargs: Additional options to pass to `send`.
 
         Returns:
             The resulting message
 
         """
-        self._message = await ctx.send(**self.to_dict())
+        self._message = await ctx.send(**self.to_dict(), **kwargs)
         self._author_id = ctx.author.id
 
         if self.timeout_interval > 1:
             self._timeout_task = Timeout(self)
-            _ = asyncio.create_task(self._timeout_task())
+            _ = asyncio.create_task(self._timeout_task())  # noqa: RUF006
 
         return self._message
 
-    async def reply(self, ctx: "PrefixedContext") -> Message:
+    async def reply(self, ctx: "PrefixedContext", **kwargs) -> Message:
         """
         Reply this paginator to ctx.
 
         Args:
             ctx: The context to reply this paginator with
+            **kwargs: Additional options to pass to `reply`.
+
         Returns:
             The resulting message
+
         """
-        self._message = await ctx.reply(**self.to_dict())
+        self._message = await ctx.reply(**self.to_dict(), **kwargs)
         self._author_id = ctx.author.id
 
         if self.timeout_interval > 1:
             self._timeout_task = Timeout(self)
-            _ = asyncio.create_task(self._timeout_task())
+            _ = asyncio.create_task(self._timeout_task())  # noqa: RUF006
 
         return self._message
 

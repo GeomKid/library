@@ -59,7 +59,9 @@ class WebhookRequests:
         """
         return await self.request(Route("GET", "/guilds/{guild_id}/webhooks", guild_id=guild_id))
 
-    async def get_webhook(self, webhook_id: "Snowflake_Type", webhook_token: str = None) -> discord_typings.WebhookData:
+    async def get_webhook(
+        self, webhook_id: "Snowflake_Type", webhook_token: str | None = None
+    ) -> discord_typings.WebhookData:
         """
         Return the new webhook object for the given id.
 
@@ -81,7 +83,7 @@ class WebhookRequests:
         name: str,
         avatar: Any,
         channel_id: "Snowflake_Type",
-        webhook_token: str = None,
+        webhook_token: str | None = None,
     ) -> discord_typings.WebhookData:
         """
         Modify a webhook.
@@ -101,7 +103,7 @@ class WebhookRequests:
             payload={"name": name, "avatar": avatar, "channel_id": channel_id},
         )
 
-    async def delete_webhook(self, webhook_id: "Snowflake_Type", webhook_token: str = None) -> None:
+    async def delete_webhook(self, webhook_id: "Snowflake_Type", webhook_token: str | None = None) -> None:
         """
         Delete a webhook.
 
@@ -124,6 +126,7 @@ class WebhookRequests:
         payload: dict,
         wait: bool = False,
         thread_id: "Snowflake_Type" = None,
+        thread_name: Optional[str] = None,
         files: list["UPLOADABLE_TYPE"] | None = None,
     ) -> Optional[discord_typings.MessageData]:
         """
@@ -134,13 +137,16 @@ class WebhookRequests:
             webhook_token: The token for the webhook
             payload: The JSON payload for the message
             wait: Waits for server confirmation of message send before response
-            thread_id: Send a message to the specified thread
+            thread_id: Send a message to the specified thread. Note that this cannot be used with `thread_name`
+            thread_name: Create a thread with this name. Note that this is only valid for forum channel and cannot be used with `thread_id`
             files: The files to send with this message
 
         Returns:
             The sent `message`, if `wait` is True else None
 
         """
+        if thread_name is not None:
+            payload["thread_name"] = thread_name
         return await self.request(
             Route("POST", "/webhooks/{webhook_id}/{webhook_token}", webhook_id=webhook_id, webhook_token=webhook_token),
             params=dict_filter_none({"wait": "true" if wait else "false", "thread_id": thread_id}),

@@ -1,17 +1,18 @@
-from typing import TYPE_CHECKING, List, cast, Mapping, Any
+from typing import TYPE_CHECKING, Any, List, Mapping, cast
 
 import discord_typings
 
 from interactions.client.utils.serializer import dict_filter_none
 from interactions.models.internal.protocols import CanRequest
-from ..route import Route, PAYLOAD_TYPE
+
+from ..route import PAYLOAD_TYPE, Route
 
 __all__ = ("GuildRequests",)
 
 
 if TYPE_CHECKING:
-    from interactions.models.discord.snowflake import Snowflake_Type
     from interactions.models.discord.enums import AuditLogEventType
+    from interactions.models.discord.snowflake import Snowflake_Type
 
 
 class GuildRequests(CanRequest):
@@ -54,8 +55,8 @@ class GuildRequests(CanRequest):
             a guild object
 
         """
-        params = {"guild_id": guild_id, "with_counts": int(with_counts)}
-        result = await self.request(Route("GET", "/guilds/{guild_id}"), params=params)
+        params = {"with_counts": int(with_counts)}
+        result = await self.request(Route("GET", "/guilds/{guild_id}", guild_id=guild_id), params=params)
         return cast(discord_typings.GuildData, result)
 
     async def get_guild_preview(self, guild_id: "Snowflake_Type") -> discord_typings.GuildPreviewData:
@@ -129,6 +130,7 @@ class GuildRequests(CanRequest):
             "system_channel_flags",
             "rules_channel_id",
             "public_updates_channel_id",
+            "safety_alerts_channel_id",
             "preferred_locale",
             "features",
             "description",
@@ -297,6 +299,32 @@ class GuildRequests(CanRequest):
             Route("DELETE", "/guilds/{guild_id}/bans/{user_id}", guild_id=guild_id, user_id=user_id), reason=reason
         )
 
+    async def bulk_guild_ban(
+        self,
+        guild_id: "Snowflake_Type",
+        user_ids: "list[Snowflake_Type]",
+        delete_message_seconds: int = 0,
+        reason: str | None = None,
+    ) -> discord_typings.BulkBanData:
+        """
+        Ban a list of users from the guild.
+
+        Args:
+            guild_id: The ID of the guild to create the ban in
+            user_ids: List of user ids to ban (max 200)
+            delete_message_seconds: Number of seconds to delete messages for (0-604800)
+            reason: The reason for this action
+
+        Returns:
+            Bulk ban object
+
+        """
+        payload = {"delete_message_days": delete_message_seconds, "user_ids": user_ids}
+        result = await self.request(
+            Route("POST", "/guilds/{guild_id}/bulk-ban", guild_id=guild_id), payload=payload, reason=reason
+        )
+        return cast(discord_typings.BulkBanData, result)
+
     async def get_guild_prune_count(
         self,
         guild_id: "Snowflake_Type",
@@ -404,9 +432,6 @@ class GuildRequests(CanRequest):
         Args:
             guild_id: The ID of the guild
             position_changes: A list of dicts representing the roles to move and their new positions
-
-            ``{"id": role_id, "position": new_position}``
-
             reason: The reason for this action
 
         Returns:
@@ -638,6 +663,7 @@ class GuildRequests(CanRequest):
 
         Returns:
             A list of channels in this guild. Does not include threads.
+
         """
         result = await self.request(Route("GET", "/guilds/{guild_id}/channels", guild_id=guild_id))
         return cast(list[discord_typings.ChannelData], result)
@@ -928,6 +954,7 @@ class GuildRequests(CanRequest):
 
         Returns:
             A list of auto moderation rules
+
         """
         result = await self.request(Route("GET", "/guilds/{guild_id}/auto-moderation/rules", guild_id=guild_id))
         return cast(list[dict], result)
@@ -944,6 +971,7 @@ class GuildRequests(CanRequest):
 
         Returns:
             The auto moderation rule
+
         """
         result = await self.request(
             Route("GET", "/guilds/{guild_id}/auto-moderation/rules/{rule_id}", guild_id=guild_id, rule_id=rule_id)
@@ -962,6 +990,7 @@ class GuildRequests(CanRequest):
 
         Returns:
             The created auto moderation rule
+
         """
         result = await self.request(
             Route("POST", "/guilds/{guild_id}/auto-moderation/rules", guild_id=guild_id), payload=payload
@@ -1000,6 +1029,7 @@ class GuildRequests(CanRequest):
 
         Returns:
             The updated rule object
+
         """
         payload = {
             "name": name,
@@ -1030,9 +1060,46 @@ class GuildRequests(CanRequest):
             guild_id: The ID of the guild to delete this rule from
             rule_id: The ID of the role to delete
             reason: The reason for deleting this rule
+
         """
         result = await self.request(
             Route("DELETE", "/guilds/{guild_id}/auto-moderation/rules/{rule_id}", guild_id=guild_id, rule_id=rule_id),
             reason=reason,
         )
         return cast(dict, result)
+
+    async def get_guild_onboarding(self, guild_id: "Snowflake_Type") -> discord_typings.GuildOnboardingData:
+        """
+        Get the guild's onboarding settings.
+
+        Args:
+            guild_id: The ID of the guild
+
+        Returns:
+            The guild's onboarding object
+
+        """
+        result = await self.request(Route("GET", "/guilds/{guild_id}/onboarding", guild_id=guild_id))
+        return cast(discord_typings.GuildOnboardingData, result)
+
+    async def modify_guild_onboarding(
+        self, guild_id: "Snowflake_Type", payload: dict, reason: str | None = None
+    ) -> discord_typings.GuildOnboardingData:
+        """
+        Modify the guild's onboarding settings.
+
+        Args:
+            guild_id: The ID of the guild
+            payload: A dict representing the modified Onboarding
+            reason: The reason for this action
+
+        Returns:
+            The updated onboarding object
+
+        """
+        result = await self.request(
+            Route("PUT", "/guilds/{guild_id}/onboarding", guild_id=guild_id),
+            payload=payload,
+            reason=reason,
+        )
+        return cast(discord_typings.GuildOnboardingData, result)

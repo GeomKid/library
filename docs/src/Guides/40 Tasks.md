@@ -1,3 +1,8 @@
+---
+search:
+  boost: 3
+---
+
 # Tasks
 
 Tasks are background processes that can be used to asynchronously run code with a specified trigger.
@@ -115,7 +120,7 @@ To start a task that has been created, you need to run the `Task.start()` method
     ```
     { .annotate }
 
-    1. See [Events](/Guides/10 Events/) for more information
+    1. See [Events](/interactions.py/Guides/10 Events/) for more information
 
 === ":two: Manual Registration"
 

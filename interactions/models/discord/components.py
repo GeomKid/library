@@ -1,14 +1,21 @@
 import contextlib
 import uuid
 from abc import abstractmethod
-from typing import Any, Dict, Iterator, List, Optional, Union
+from typing import Any, Dict, Iterator, List, Optional, Union, TYPE_CHECKING
 
+import attrs
 import discord_typings
 
+import interactions.models.discord as d_models
+from interactions.models.discord.snowflake import Snowflake, Snowflake_Type
 from interactions.client.const import ACTION_ROW_MAX_ITEMS, MISSING
 from interactions.client.mixins.serialization import DictSerializationMixin
+from interactions.models.discord.base import DiscordObject
 from interactions.models.discord.emoji import PartialEmoji, process_emoji
 from interactions.models.discord.enums import ButtonStyle, ChannelType, ComponentType
+
+if TYPE_CHECKING:
+    import interactions.models.discord
 
 __all__ = (
     "BaseComponent",
@@ -26,6 +33,8 @@ __all__ = (
     "spread_to_rows",
     "get_components_ids",
     "TYPE_COMPONENT_MAPPING",
+    "SelectDefaultValues",
+    "DefaultableSelectMenu",
 )
 
 
@@ -71,6 +80,7 @@ class BaseComponent(DictSerializationMixin):
         Args:
             data: the payload from Discord
             alternate_mapping: an optional mapping of component types to classes
+
         """
         data.pop("hash", None)  # redundant
 
@@ -110,6 +120,7 @@ class ActionRow(BaseComponent):
 
     Attributes:
         components list[Dict | BaseComponent]: A sequence of components contained within this action row
+
     """
 
     def __init__(self, *components: Dict | BaseComponent) -> None:
@@ -137,6 +148,7 @@ class ActionRow(BaseComponent):
 
         Args:
             *components: The component(s) to add.
+
         """
         if isinstance(components, (list, tuple)):
             # flatten user error
@@ -155,6 +167,7 @@ class ActionRow(BaseComponent):
 
         Returns:
             A list of action rows.
+
         """
         buffer = []
         action_rows = []
@@ -199,6 +212,7 @@ class Button(InteractiveComponent):
         label optional[str]: The text that appears on the button, max 80 characters.
         emoji optional[Union[PartialEmoji, dict, str]]: The emoji that appears on the button.
         custom_id Optional[str]: A developer-defined identifier for the button, max 100 characters.
+        sku_id: Optional[Snowflake_Type]: Identifier for a purchasable SKU, only available when using premium-style buttons
         url Optional[str]: A url for link-style buttons.
         disabled bool: Disable the button and make it not interactable, default false.
 
@@ -212,7 +226,8 @@ class Button(InteractiveComponent):
         style: ButtonStyle | int,
         label: str | None = None,
         emoji: "PartialEmoji | None | str" = None,
-        custom_id: str = None,
+        custom_id: str | None = None,
+        sku_id: Snowflake_Type | None = None,
         url: str | None = None,
         disabled: bool = False,
     ) -> None:
@@ -220,6 +235,7 @@ class Button(InteractiveComponent):
         self.label: str | None = label
         self.emoji: "PartialEmoji | None" = emoji
         self.custom_id: str | None = custom_id
+        self.sku_id: Snowflake_Type | None = sku_id
         self.url: str | None = url
         self.disabled: bool = disabled
 
@@ -231,10 +247,17 @@ class Button(InteractiveComponent):
             if self.url is None:
                 raise ValueError("URL buttons must have a url.")
 
+        elif self.style == ButtonStyle.PREMIUM:
+            if any(p is not None for p in (self.custom_id, self.url, self.emoji, self.label)):
+                raise ValueError("Premium buttons cannot have a custom_id, url, emoji, or label.")
+            if self.sku_id is None:
+                raise ValueError("Premium buttons must have a sku_id.")
+
         elif self.custom_id is None:
             self.custom_id = str(uuid.uuid4())
-        if not self.label and not self.emoji:
-            raise ValueError("Buttons must have a label or an emoji.")
+
+        if self.style != ButtonStyle.PREMIUM and not self.label and not self.emoji:
+            raise ValueError("Non-premium buttons must have a label or an emoji.")
 
         if isinstance(self.emoji, str):
             self.emoji = PartialEmoji.from_str(self.emoji)
@@ -248,12 +271,13 @@ class Button(InteractiveComponent):
             label=data.get("label"),
             emoji=emoji,
             custom_id=data.get("custom_id"),
+            sku_id=data.get("sku_id"),
             url=data.get("url"),
             disabled=data.get("disabled", False),
         )
 
     def __repr__(self) -> str:
-        return f"<{self.__class__.__name__} type={self.type} style={self.style} label={self.label} emoji={self.emoji} custom_id={self.custom_id} url={self.url} disabled={self.disabled}>"
+        return f"<{self.__class__.__name__} type={self.type} style={self.style} label={self.label} emoji={self.emoji} custom_id={self.custom_id} sku_id={self.sku_id} url={self.url} disabled={self.disabled}>"
 
     def to_dict(self) -> discord_typings.ButtonComponentData:
         emoji = self.emoji.to_dict() if self.emoji else None
@@ -266,6 +290,7 @@ class Button(InteractiveComponent):
             "label": self.label,
             "emoji": emoji,
             "custom_id": self.custom_id,
+            "sku_id": self.sku_id,
             "url": self.url,
             "disabled": self.disabled,
         }
@@ -282,6 +307,7 @@ class BaseSelectMenu(InteractiveComponent):
         max_values Optional[int]: The maximum number of items that can be chosen. (default 1, max 25)
         disabled bool: Disable the select and make it not intractable, default false.
         type Union[ComponentType, int]: The action role type number defined by discord. This cannot be modified.
+
     """
 
     def __init__(
@@ -325,6 +351,94 @@ class BaseSelectMenu(InteractiveComponent):
         }
 
 
+@attrs.define(eq=False, order=False, hash=False, slots=False)
+class SelectDefaultValues(DiscordObject):
+    id: Snowflake
+    """ID of a user, role, or channel"""
+    type: str
+    """Type of value that id represents. Either "user", "role", or "channel"""
+
+    @classmethod
+    def from_object(cls, obj: DiscordObject) -> "SelectDefaultValues":
+        """Create a default value from a discord object."""
+        match obj:
+            case d_models.User():
+                return cls(client=obj._client, id=obj.id, type="user")
+            case d_models.Member():
+                return cls(client=obj._client, id=obj.id, type="user")
+            case d_models.BaseChannel():
+                return cls(client=obj._client, id=obj.id, type="channel")
+            case d_models.Role():
+                return cls(client=obj._client, id=obj.id, type="role")
+            case _:
+                raise TypeError(
+                    f"Cannot convert {obj} of type {type(obj)} to a SelectDefaultValues - Expected User, Channel, Member, or Role"
+                )
+
+
+class DefaultableSelectMenu(BaseSelectMenu):
+    default_values: (
+        list[
+            Union[
+                "interactions.models.discord.BaseUser",
+                "interactions.models.discord.Role",
+                "interactions.models.discord.BaseChannel",
+                "interactions.models.discord.Member",
+                SelectDefaultValues,
+            ]
+        ]
+        | None
+    ) = None
+
+    def __init__(
+        self,
+        defaults: (
+            list[
+                Union[
+                    "interactions.models.discord.BaseUser",
+                    "interactions.models.discord.Role",
+                    "interactions.models.discord.BaseChannel",
+                    "interactions.models.discord.Member",
+                    SelectDefaultValues,
+                ]
+            ]
+            | None
+        ) = None,
+        **kwargs,
+    ) -> None:
+        super().__init__(**kwargs)
+        self.default_values = defaults
+
+    def add_default_value(
+        self,
+        value: Union[
+            "interactions.models.discord.BaseUser",
+            "interactions.models.discord.Role",
+            "interactions.models.discord.BaseChannel",
+            "interactions.models.discord.Member",
+            SelectDefaultValues,
+        ],
+    ) -> None:
+        if self.default_values is None:
+            self.default_values = []
+        self.default_values.append(value)
+
+    def to_dict(self) -> discord_typings.SelectMenuComponentData:
+        data = super().to_dict()
+        if self.default_values is not None:
+            data["default_values"] = [  # type: ignore # waiting on discord typings to update
+                (
+                    value.to_dict()
+                    if isinstance(value, SelectDefaultValues)
+                    else SelectDefaultValues.from_object(value).to_dict()
+                )
+                for value in self.default_values
+            ]
+
+        # Discord handles the type checking, no need to do it here
+        return data
+
+
 class StringSelectOption(BaseComponent):
     """
     Represents a select option.
@@ -335,6 +449,7 @@ class StringSelectOption(BaseComponent):
         description Optional[str]: A description of this option
         emoji Optional[Union[PartialEmoji, dict, str]: An emoji to show in this select option
         default bool: Is this option selected by default
+
     """
 
     def __init__(
@@ -412,6 +527,7 @@ class StringSelectMenu(BaseSelectMenu):
         max_values Optional[int]: The maximum number of items that can be chosen. (default 1, max 25)
         disabled bool: Disable the select and make it not intractable, default false.
         type Union[ComponentType, int]: The action role type number defined by discord. This cannot be modified.
+
     """
 
     def __init__(
@@ -461,7 +577,7 @@ class StringSelectMenu(BaseSelectMenu):
         }
 
 
-class UserSelectMenu(BaseSelectMenu):
+class UserSelectMenu(DefaultableSelectMenu):
     """
     Represents a user select component.
 
@@ -472,6 +588,7 @@ class UserSelectMenu(BaseSelectMenu):
         max_values Optional[int]: The maximum number of items that can be chosen. (default 1, max 25)
         disabled bool: Disable the select and make it not intractable, default false.
         type Union[ComponentType, int]: The action role type number defined by discord. This cannot be modified.
+
     """
 
     def __init__(
@@ -481,6 +598,18 @@ class UserSelectMenu(BaseSelectMenu):
         min_values: int = 1,
         max_values: int = 1,
         custom_id: str | None = None,
+        default_values: (
+            list[
+                Union[
+                    "interactions.models.discord.BaseUser",
+                    "interactions.models.discord.Role",
+                    "interactions.models.discord.BaseChannel",
+                    "interactions.models.discord.Member",
+                    SelectDefaultValues,
+                ],
+            ]
+            | None
+        ) = None,
         disabled: bool = False,
     ) -> None:
         super().__init__(
@@ -489,12 +618,13 @@ class UserSelectMenu(BaseSelectMenu):
             max_values=max_values,
             custom_id=custom_id,
             disabled=disabled,
+            defaults=default_values,
         )
 
         self.type: ComponentType = ComponentType.USER_SELECT
 
 
-class RoleSelectMenu(BaseSelectMenu):
+class RoleSelectMenu(DefaultableSelectMenu):
     """
     Represents a user select component.
 
@@ -505,6 +635,7 @@ class RoleSelectMenu(BaseSelectMenu):
         max_values Optional[int]: The maximum number of items that can be chosen. (default 1, max 25)
         disabled bool: Disable the select and make it not intractable, default false.
         type Union[ComponentType, int]: The action role type number defined by discord. This cannot be modified.
+
     """
 
     def __init__(
@@ -515,6 +646,18 @@ class RoleSelectMenu(BaseSelectMenu):
         max_values: int = 1,
         custom_id: str | None = None,
         disabled: bool = False,
+        default_values: (
+            list[
+                Union[
+                    "interactions.models.discord.BaseUser",
+                    "interactions.models.discord.Role",
+                    "interactions.models.discord.BaseChannel",
+                    "interactions.models.discord.Member",
+                    SelectDefaultValues,
+                ],
+            ]
+            | None
+        ) = None,
     ) -> None:
         super().__init__(
             placeholder=placeholder,
@@ -522,12 +665,13 @@ class RoleSelectMenu(BaseSelectMenu):
             max_values=max_values,
             custom_id=custom_id,
             disabled=disabled,
+            defaults=default_values,
         )
 
         self.type: ComponentType = ComponentType.ROLE_SELECT
 
 
-class MentionableSelectMenu(BaseSelectMenu):
+class MentionableSelectMenu(DefaultableSelectMenu):
     def __init__(
         self,
         *,
@@ -536,6 +680,18 @@ class MentionableSelectMenu(BaseSelectMenu):
         max_values: int = 1,
         custom_id: str | None = None,
         disabled: bool = False,
+        default_values: (
+            list[
+                Union[
+                    "interactions.models.discord.BaseUser",
+                    "interactions.models.discord.Role",
+                    "interactions.models.discord.BaseChannel",
+                    "interactions.models.discord.Member",
+                    SelectDefaultValues,
+                ],
+            ]
+            | None
+        ) = None,
     ) -> None:
         super().__init__(
             placeholder=placeholder,
@@ -543,12 +699,13 @@ class MentionableSelectMenu(BaseSelectMenu):
             max_values=max_values,
             custom_id=custom_id,
             disabled=disabled,
+            defaults=default_values,
         )
 
         self.type: ComponentType = ComponentType.MENTIONABLE_SELECT
 
 
-class ChannelSelectMenu(BaseSelectMenu):
+class ChannelSelectMenu(DefaultableSelectMenu):
     def __init__(
         self,
         *,
@@ -558,6 +715,18 @@ class ChannelSelectMenu(BaseSelectMenu):
         max_values: int = 1,
         custom_id: str | None = None,
         disabled: bool = False,
+        default_values: (
+            list[
+                Union[
+                    "interactions.models.discord.BaseUser",
+                    "interactions.models.discord.Role",
+                    "interactions.models.discord.BaseChannel",
+                    "interactions.models.discord.Member",
+                    SelectDefaultValues,
+                ],
+            ]
+            | None
+        ) = None,
     ) -> None:
         super().__init__(
             placeholder=placeholder,
@@ -565,6 +734,7 @@ class ChannelSelectMenu(BaseSelectMenu):
             max_values=max_values,
             custom_id=custom_id,
             disabled=disabled,
+            defaults=default_values,
         )
 
         self.channel_types: list[ChannelType] | None = channel_types or []

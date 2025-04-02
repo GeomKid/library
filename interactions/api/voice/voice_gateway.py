@@ -268,7 +268,7 @@ class VoiceGateway(WebsocketClient):
         keep_alive = b"\xc9\x00\x00\x00\x00\x00\x00\x00\x00"
 
         self.logger.debug("Starting UDP Keep Alive")
-        while not self.socket._closed and not self.ws.closed:
+        while not self.socket._closed and self.ws and not self.ws.closed:
             try:
                 _, writable, _ = select.select([], [self.socket], [], 0)
                 while not writable:
@@ -279,6 +279,8 @@ class VoiceGateway(WebsocketClient):
                 time.sleep(5)
             except socket.error as e:
                 self.logger.warning(f"Ending Keep Alive due to {e}")
+                return
+            except AttributeError:
                 return
             except Exception as e:
                 self.logger.debug("Keep Alive Error: ", exc_info=e)
@@ -348,7 +350,7 @@ class VoiceGateway(WebsocketClient):
         self.timestamp += encoder.samples_per_frame
 
     async def send_heartbeat(self) -> None:
-        await self.send_json({"op": OP.HEARTBEAT, "d": random.uniform(0.0, 1.0)})
+        await self.send_json({"op": OP.HEARTBEAT, "d": random.getrandbits(64)})
         self.logger.debug("❤ Voice Connection is sending Heartbeat")
 
     async def _identify(self) -> None:

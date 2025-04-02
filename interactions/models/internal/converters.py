@@ -1,8 +1,8 @@
 import re
 import typing
-from typing import Any, Optional, List
+from typing import Any, Optional, List, Annotated
 
-from interactions.client.const import T, T_co
+from interactions.client.const import T, T_co, Sentinel
 from interactions.client.errors import BadArgument
 from interactions.client.errors import Forbidden, HTTPException
 from interactions.models.discord.channel import (
@@ -66,6 +66,7 @@ __all__ = (
     "CustomEmojiConverter",
     "MessageConverter",
     "Greedy",
+    "ConsumeRest",
     "MODEL_TO_CONVERTER",
 )
 
@@ -127,6 +128,7 @@ class SnowflakeConverter(IDConverter[SnowflakeObject]):
 
         Returns:
             SnowflakeObject: The converted object.
+
         """
         match = self._get_id_match(argument) or re.match(r"<(?:@(?:!|&)?|#)([0-9]{15,})>$", argument)
 
@@ -161,6 +163,7 @@ class ChannelConverter(IDConverter[T_co]):
         Returns:
             BaseChannel: The converted object.
             The channel type will be of the type the converter represents.
+
         """
         match = self._get_id_match(argument) or re.match(r"<#([0-9]{15,})>$", argument)
         result = None
@@ -286,6 +289,7 @@ class UserConverter(IDConverter[User]):
 
         Returns:
             User: The converted object.
+
         """
         match = self._get_id_match(argument) or re.match(r"<@!?([0-9]{15,})>$", argument)
         result = None
@@ -344,6 +348,7 @@ class MemberConverter(IDConverter[Member]):
 
         Returns:
             Member: The converted object.
+
         """
         if not ctx.guild:
             raise BadArgument("This command cannot be used in private messages.")
@@ -397,6 +402,7 @@ class MessageConverter(Converter[Message]):
 
         Returns:
             Message: The converted object.
+
         """
         match = self._ID_REGEX.match(argument) or self._MESSAGE_LINK_REGEX.match(argument)
         if not match:
@@ -443,6 +449,7 @@ class GuildConverter(IDConverter[Guild]):
 
         Returns:
             Guild: The converted object.
+
         """
         match = self._get_id_match(argument)
         result = None
@@ -479,6 +486,7 @@ class RoleConverter(IDConverter[Role]):
 
         Returns:
             Role: The converted object.
+
         """
         if not ctx.guild:
             raise BadArgument("This command cannot be used in private messages.")
@@ -512,6 +520,7 @@ class PartialEmojiConverter(IDConverter[PartialEmoji]):
 
         Returns:
             PartialEmoji: The converted object.
+
         """
         if match := re.match(r"<a?:[a-zA-Z0-9\_]{1,32}:([0-9]{15,})>$", argument):
             emoji_animated = bool(match[1])
@@ -544,6 +553,7 @@ class CustomEmojiConverter(IDConverter[CustomEmoji]):
 
         Returns:
             CustomEmoji: The converted object.
+
         """
         if not ctx.guild:
             raise BadArgument("This command cannot be used in private messages.")
@@ -571,6 +581,15 @@ class CustomEmojiConverter(IDConverter[CustomEmoji]):
 class Greedy(List[T]):
     """A special marker class to mark an argument in a prefixed command to repeatedly convert until it fails to convert an argument."""
 
+
+class ConsumeRestMarker(Sentinel):
+    pass
+
+
+CONSUME_REST_MARKER = ConsumeRestMarker()
+
+ConsumeRest = Annotated[T, CONSUME_REST_MARKER]
+"""A special marker type alias to mark an argument in a prefixed command to consume the rest of the arguments."""
 
 MODEL_TO_CONVERTER: dict[type, type[Converter]] = {
     SnowflakeObject: SnowflakeConverter,

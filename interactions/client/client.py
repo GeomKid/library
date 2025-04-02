@@ -1,15 +1,18 @@
 import asyncio
 import contextlib
 import functools
+import glob
 import importlib.util
 import inspect
 import logging
+import os
 import re
 import sys
 import time
 import traceback
 from collections.abc import Iterable
 from datetime import datetime
+from typing_extensions import Self
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -24,7 +27,11 @@ from typing import (
     Union,
     Awaitable,
     Tuple,
+    TypeVar,
+    overload,
 )
+
+from aiohttp import BasicAuth
 
 import interactions.api.events as events
 import interactions.client.const as constants
@@ -36,6 +43,7 @@ from interactions.api.http.http_client import HTTPClient
 from interactions.client import errors
 from interactions.client.const import (
     GLOBAL_SCOPE,
+    Missing,
     MISSING,
     Absent,
     EMBED_MAX_DESC_LENGTH,
@@ -83,16 +91,23 @@ from interactions.models import Wait
 from interactions.models.discord.color import BrandColors
 from interactions.models.discord.components import get_components_ids, BaseComponent
 from interactions.models.discord.embed import Embed
+from interactions.models.discord.entitlement import Entitlement
 from interactions.models.discord.enums import (
     ComponentType,
     Intents,
     InteractionType,
     Status,
+    MessageFlags,
 )
 from interactions.models.discord.file import UPLOADABLE_TYPE
 from interactions.models.discord.snowflake import Snowflake, to_snowflake_list
 from interactions.models.internal.active_voice_state import ActiveVoiceState
-from interactions.models.internal.application_commands import ContextMenu, ModalCommand, GlobalAutoComplete
+from interactions.models.internal.application_commands import (
+    ContextMenu,
+    ModalCommand,
+    GlobalAutoComplete,
+    CallbackType,
+)
 from interactions.models.internal.auto_defer import AutoDefer
 from interactions.models.internal.callback import CallbackObject
 from interactions.models.internal.command import BaseCommand
@@ -111,9 +126,9 @@ from interactions.models.internal.tasks import Task
 if TYPE_CHECKING:
     from interactions.models import Snowflake_Type, TYPE_ALL_CHANNEL
 
+EventT = TypeVar("EventT", bound=BaseEvent)
 
 __all__ = ("Client",)
-
 
 # see https://discord.com/developers/docs/topics/gateway#list-of-intents
 _INTENT_EVENTS: dict[BaseEvent, list[Intents]] = {
@@ -167,6 +182,12 @@ _INTENT_EVENTS: dict[BaseEvent, list[Intents]] = {
     events.AutoModCreated: [Intents.AUTO_MODERATION_CONFIGURATION, Intents.AUTO_MOD],
     events.AutoModUpdated: [Intents.AUTO_MODERATION_CONFIGURATION, Intents.AUTO_MOD],
     events.AutoModDeleted: [Intents.AUTO_MODERATION_CONFIGURATION, Intents.AUTO_MOD],
+    # Intents.GUILD_SCHEDULED_EVENTS
+    events.GuildScheduledEventCreate: [Intents.GUILD_SCHEDULED_EVENTS],
+    events.GuildScheduledEventUpdate: [Intents.GUILD_SCHEDULED_EVENTS],
+    events.GuildScheduledEventDelete: [Intents.GUILD_SCHEDULED_EVENTS],
+    events.GuildScheduledEventUserAdd: [Intents.GUILD_SCHEDULED_EVENTS],
+    events.GuildScheduledEventUserRemove: [Intents.GUILD_SCHEDULED_EVENTS],
     # multiple intents
     events.ThreadMembersUpdate: [Intents.GUILDS, Intents.GUILD_MEMBERS],
     events.TypingStart: [
@@ -193,18 +214,25 @@ _INTENT_EVENTS: dict[BaseEvent, list[Intents]] = {
         Intents.DIRECT_MESSAGE_REACTIONS,
         Intents.REACTIONS,
     ],
+    events.MessageReactionRemoveEmoji: [
+        Intents.GUILD_MESSAGE_REACTIONS,
+        Intents.DIRECT_MESSAGE_REACTIONS,
+        Intents.REACTIONS,
+    ],
 }
 
 
 class Client(
     processors.AutoModEvents,
     processors.ChannelEvents,
+    processors.EntitlementEvents,
     processors.GuildEvents,
     processors.IntegrationEvents,
     processors.MemberEvents,
     processors.MessageEvents,
     processors.ReactionEvents,
     processors.RoleEvents,
+    processors.ScheduledEvents,
     processors.StageEvents,
     processors.ThreadEvents,
     processors.UserEvents,
@@ -225,6 +253,7 @@ class Client(
         enforce_interaction_perms: Enforce discord application command permissions, locally
         fetch_members: Should the client fetch members from guilds upon startup (this will delay the client being ready)
         send_command_tracebacks: Automatically send uncaught tracebacks if a command throws an exception
+        send_not_ready_messages: Send a message to the user if they try to use a command before the client is ready
 
         auto_defer: AutoDefer: A system to automatically defer commands after a set duration
         interaction_context: Type[InteractionContext]: InteractionContext: The object to instantiate for Interaction Context
@@ -240,6 +269,9 @@ class Client(
         basic_logging: Utilise basic logging to output library data to console. Do not use in combination with `Client.logger`
         logging_level: The level of logging to use for basic_logging. Do not use in combination with `Client.logger`
         logger: The logger interactions.py should use. Do not use in combination with `Client.basic_logging` and `Client.logging_level`. Note: Different loggers with multiple clients are not supported
+
+        proxy: A http/https proxy to use for all requests
+        proxy_auth: The auth to use for the proxy - must be either a tuple of (username, password) or aiohttp.BasicAuth
 
     Optionally, you can configure the caches here, by specifying the name of the cache, followed by a dict-style object to use.
     It is recommended to use `smart_cache.create_cache` to configure the cache here.
@@ -277,12 +309,15 @@ class Client(
         modal_context: Type[BaseContext] = ModalContext,
         owner_ids: Iterable["Snowflake_Type"] = (),
         send_command_tracebacks: bool = True,
+        send_not_ready_messages: bool = False,
         shard_id: int = 0,
         show_ratelimit_tracebacks: bool = False,
         slash_context: Type[BaseContext] = SlashContext,
         status: Status = Status.ONLINE,
         sync_ext: bool = True,
         sync_interactions: bool = True,
+        proxy_url: str | None = None,
+        proxy_auth: BasicAuth | tuple[str, str] | None = None,
         token: str | None = None,
         total_shards: int = 1,
         **kwargs,
@@ -312,6 +347,8 @@ class Client(
         """Sync global commands as guild for quicker command updates during debug"""
         self.send_command_tracebacks: bool = send_command_tracebacks
         """Should the traceback of command errors be sent in reply to the command invocation"""
+        self.send_not_ready_messages: bool = send_not_ready_messages
+        """Should the bot send a message when it is not ready yet in response to a command invocation"""
         if auto_defer is True:
             auto_defer = AutoDefer(enabled=True)
         else:
@@ -321,22 +358,27 @@ class Client(
         self.intents = intents if isinstance(intents, Intents) else Intents(intents)
 
         # resources
+        if isinstance(proxy_auth, tuple):
+            proxy_auth = BasicAuth(*proxy_auth)
 
-        self.http: HTTPClient = HTTPClient(logger=self.logger, show_ratelimit_tracebacks=show_ratelimit_tracebacks)
+        proxy = (proxy_url, proxy_auth) if proxy_url or proxy_auth else None
+        self.http: HTTPClient = HTTPClient(
+            logger=self.logger, show_ratelimit_tracebacks=show_ratelimit_tracebacks, proxy=proxy
+        )
         """The HTTP client to use when interacting with discord endpoints"""
 
         # context factories
-        self.interaction_context: Type[BaseContext] = interaction_context
+        self.interaction_context: Type[BaseContext[Self]] = interaction_context
         """The object to instantiate for Interaction Context"""
-        self.component_context: Type[BaseContext] = component_context
+        self.component_context: Type[BaseContext[Self]] = component_context
         """The object to instantiate for Component Context"""
-        self.autocomplete_context: Type[BaseContext] = autocomplete_context
+        self.autocomplete_context: Type[BaseContext[Self]] = autocomplete_context
         """The object to instantiate for Autocomplete Context"""
-        self.modal_context: Type[BaseContext] = modal_context
+        self.modal_context: Type[BaseContext[Self]] = modal_context
         """The object to instantiate for Modal Context"""
-        self.slash_context: Type[BaseContext] = slash_context
+        self.slash_context: Type[BaseContext[Self]] = slash_context
         """The object to instantiate for Slash Context"""
-        self.context_menu_context: Type[BaseContext] = context_menu_context
+        self.context_menu_context: Type[BaseContext[Self]] = context_menu_context
         """The object to instantiate for Context Menu Context"""
 
         self.token: str | None = token
@@ -379,13 +421,14 @@ class Client(
         """A dictionary of registered application commands: `{scope: [commands]}`"""
         self._interaction_lookup: dict[str, InteractionCommand] = {}
         """A dictionary of registered application commands: `{name: command}`"""
-        self.interaction_tree: Dict[
-            "Snowflake_Type", Dict[str, InteractionCommand | Dict[str, InteractionCommand]]
-        ] = {}
+        self.interaction_tree: Dict["Snowflake_Type", Dict[str, InteractionCommand | Dict[str, InteractionCommand]]] = (
+            {}
+        )
         """A dictionary of registered application commands in a tree"""
         self._component_callbacks: Dict[str, Callable[..., Coroutine]] = {}
         self._regex_component_callbacks: Dict[re.Pattern, Callable[..., Coroutine]] = {}
         self._modal_callbacks: Dict[str, Callable[..., Coroutine]] = {}
+        self._regex_modal_callbacks: Dict[re.Pattern, Callable[..., Coroutine]] = {}
         self._global_autocompletes: Dict[str, GlobalAutoComplete] = {}
         self.processors: Dict[str, Callable[..., Coroutine]] = {}
         self.__modules = {}
@@ -397,6 +440,8 @@ class Client(
 
         self.async_startup_tasks: list[tuple[Callable[..., Coroutine], Iterable[Any], dict[str, Any]]] = []
         """A list of coroutines to run during startup"""
+
+        self._add_command_hook: list[Callable[[Callable], Any]] = []
 
         # callbacks
         if global_pre_run_callback:
@@ -490,6 +535,16 @@ class Client(
         return self.user.guilds
 
     @property
+    def guild_count(self) -> int:
+        """
+        Returns the number of guilds the bot is in.
+
+        This function is faster than using `len(client.guilds)` as it does not require using the cache.
+        As such, this is preferred when you only need the count of guilds.
+        """
+        return self.user.guild_count
+
+    @property
     def status(self) -> Status:
         """
         Get the status of the bot.
@@ -524,6 +579,7 @@ class Client(
     def _sanity_check(self) -> None:
         """Checks for possible and common errors in the bot's configuration."""
         self.logger.debug("Running client sanity checks...")
+
         contexts = {
             self.interaction_context: InteractionContext,
             self.component_context: ComponentContext,
@@ -571,11 +627,17 @@ class Client(
                 ):
                     await self.wait_until_ready()
 
-                if len(_event.__attrs_attrs__) == 2 and coro.event != "event":
-                    # override_name & bot & logging
-                    await _coro()
-                else:
+                # don't pass event object if listener doesn't expect it
+                if _coro.pass_event_object:
                     await _coro(_event, *_args, **_kwargs)
+                else:
+                    if not _coro.warned_no_event_arg and len(_event.__attrs_attrs__) > 2 and _coro.event != "event":
+                        self.logger.warning(
+                            f"{_coro} is listening to {_coro.event} event which contains event data. "
+                            f"Add an event argument to this listener to receive the event data object."
+                        )
+                        _coro.warned_no_event_arg = True
+                    await _coro()
             except asyncio.CancelledError:
                 pass
             except Exception as e:
@@ -678,7 +740,7 @@ class Client(
                     embeds=Embed(
                         title=f"Error: {type(event.error).__name__}",
                         color=BrandColors.RED,
-                        description=f"```\n{out[:EMBED_MAX_DESC_LENGTH-8]}```",
+                        description=f"```\n{out[:EMBED_MAX_DESC_LENGTH - 8]}```",
                     )
                 )
 
@@ -850,13 +912,12 @@ class Client(
             listener = Listener.create("_on_raw_guild_create")(_temp_listener)
             self.add_listener(listener)
 
-            while True:
+            while len(ready_guilds) != len(expected_guilds):
                 try:
                     await asyncio.wait_for(self._guild_event.wait(), self.guild_event_timeout)
-                    if len(ready_guilds) == len(expected_guilds):
-                        break
                 except asyncio.TimeoutError:
                     break
+                self._guild_event.clear()
 
             self.listeners["raw_guild_create"].remove(listener)
 
@@ -885,6 +946,11 @@ class Client(
         # so im gathering commands here
         self._gather_callbacks()
 
+        if any(v for v in constants.CLIENT_FEATURE_FLAGS.values()):
+            # list all enabled flags
+            enabled_flags = [k for k, v in constants.CLIENT_FEATURE_FLAGS.items() if v]
+            self.logger.info(f"Enabled feature flags: {', '.join(enabled_flags)}")
+
         self.logger.debug("Attempting to login")
         me = await self.http.login(self.token)
         self._user = ClientUser.from_dict(me, self)
@@ -903,6 +969,7 @@ class Client(
 
         Args:
             token: Your bot's token
+
         """
         await self.login(token)
 
@@ -996,7 +1063,7 @@ class Client(
 
         try:
             asyncio.get_running_loop()
-            _ = asyncio.create_task(self._process_waits(event))
+            _ = asyncio.create_task(self._process_waits(event))  # noqa: RUF006
         except RuntimeError:
             # dispatch attempt before event loop is running
             self.async_startup_tasks.append((self._process_waits, (event,), {}))
@@ -1010,12 +1077,36 @@ class Client(
         """Waits for the client to become ready."""
         await self._ready.wait()
 
+    @overload
     def wait_for(
         self,
-        event: Union[str, "BaseEvent"],
-        checks: Absent[Optional[Union[Callable[..., bool], Callable[..., Awaitable[bool]]]]] = MISSING,
+        event: type[EventT],
+        checks: Absent[Callable[[EventT], bool] | Callable[[EventT], Awaitable[bool]]] = MISSING,
         timeout: Optional[float] = None,
-    ) -> Any:
+    ) -> "Awaitable[EventT]": ...
+
+    @overload
+    def wait_for(
+        self,
+        event: str,
+        checks: Callable[[EventT], bool] | Callable[[EventT], Awaitable[bool]],
+        timeout: Optional[float] = None,
+    ) -> "Awaitable[EventT]": ...
+
+    @overload
+    def wait_for(
+        self,
+        event: str,
+        checks: Missing = MISSING,
+        timeout: Optional[float] = None,
+    ) -> Awaitable[Any]: ...
+
+    def wait_for(
+        self,
+        event: Union[str, "type[BaseEvent]"],
+        checks: Absent[Callable[[BaseEvent], bool] | Callable[[BaseEvent], Awaitable[bool]]] = MISSING,
+        timeout: Optional[float] = None,
+    ) -> Awaitable[Any]:
         """
         Waits for a WebSocket event to be dispatched.
 
@@ -1026,6 +1117,7 @@ class Client(
 
         Returns:
             The event object.
+
         """
         event = get_event_name(event)
 
@@ -1060,7 +1152,7 @@ class Client(
         """
         author = to_snowflake(author) if author else None
 
-        def predicate(event) -> bool:
+        def predicate(event: events.ModalCompletion) -> bool:
             if modal.custom_id != event.ctx.custom_id:
                 return False
             return author == to_snowflake(event.ctx.author) if author else True
@@ -1068,9 +1160,60 @@ class Client(
         resp = await self.wait_for("modal_completion", predicate, timeout)
         return resp.ctx
 
+    @overload
     async def wait_for_component(
         self,
-        messages: Union[Message, int, list] = None,
+        messages: Union[Message, int, list],
+        components: Union[
+            List[List[Union["BaseComponent", dict]]],
+            List[Union["BaseComponent", dict]],
+            "BaseComponent",
+            dict,
+        ],
+        check: Optional[Callable[[events.Component], bool] | Callable[[events.Component], Awaitable[bool]]] = None,
+        timeout: Optional[float] = None,
+    ) -> "events.Component": ...
+
+    @overload
+    async def wait_for_component(
+        self,
+        *,
+        components: Union[
+            List[List[Union["BaseComponent", dict]]],
+            List[Union["BaseComponent", dict]],
+            "BaseComponent",
+            dict,
+        ],
+        check: Optional[Callable[[events.Component], bool] | Callable[[events.Component], Awaitable[bool]]] = None,
+        timeout: Optional[float] = None,
+    ) -> "events.Component": ...
+
+    @overload
+    async def wait_for_component(
+        self,
+        messages: None,
+        components: Union[
+            List[List[Union["BaseComponent", dict]]],
+            List[Union["BaseComponent", dict]],
+            "BaseComponent",
+            dict,
+        ],
+        check: Optional[Callable[[events.Component], bool] | Callable[[events.Component], Awaitable[bool]]] = None,
+        timeout: Optional[float] = None,
+    ) -> "events.Component": ...
+
+    @overload
+    async def wait_for_component(
+        self,
+        messages: Union[Message, int, list],
+        components: None = None,
+        check: Optional[Callable[[events.Component], bool] | Callable[[events.Component], Awaitable[bool]]] = None,
+        timeout: Optional[float] = None,
+    ) -> "events.Component": ...
+
+    async def wait_for_component(
+        self,
+        messages: Optional[Union[Message, int, list]] = None,
         components: Optional[
             Union[
                 List[List[Union["BaseComponent", dict]]],
@@ -1079,7 +1222,7 @@ class Client(
                 dict,
             ]
         ] = None,
-        check: Optional[Callable] = None,
+        check: Optional[Callable[[events.Component], bool] | Callable[[events.Component], Awaitable[bool]]] = None,
         timeout: Optional[float] = None,
     ) -> "events.Component":
         """
@@ -1110,7 +1253,7 @@ class Client(
         if custom_ids and not all(isinstance(x, str) for x in custom_ids):
             custom_ids = [str(i) for i in custom_ids]
 
-        def _check(event: events.Component) -> bool:
+        async def _check(event: events.Component) -> bool:
             ctx: ComponentContext = event.ctx
             # if custom_ids is empty or there is a match
             wanted_message = not message_ids or ctx.message.id in (
@@ -1118,6 +1261,8 @@ class Client(
             )
             wanted_component = not custom_ids or ctx.custom_id in custom_ids
             if wanted_message and wanted_component:
+                if asyncio.iscoroutinefunction(check):
+                    return bool(check is None or await check(event))
                 return bool(check is None or check(event))
             return False
 
@@ -1125,7 +1270,9 @@ class Client(
 
     def command(self, *args, **kwargs) -> Callable:
         """A decorator that registers a command. Aliases `interactions.slash_command`"""
-        raise NotImplementedError  # TODO: implement
+        raise NotImplementedError(
+            "Use interactions.slash_command instead. Please consult the v4 -> v5 migration guide https://interactions-py.github.io/interactions.py/Guides/98%20Migration%20from%204.X/"
+        )
 
     def listen(self, event_name: Absent[str] = MISSING) -> Callable[[AsyncCallable], Listener]:
         """
@@ -1201,6 +1348,8 @@ class Client(
         if listener in self.listeners.get(listener.event, []):
             self.logger.debug(f"Listener {listener} has already been hooked, not re-hooking it again")
             return
+
+        listener.lazy_parse_params()
 
         if listener.event not in self.listeners:
             self.listeners[listener.event] = []
@@ -1295,11 +1444,28 @@ class Client(
 
         Args:
             command: The command to add
+
         """
+        # test for parameters that arent the ctx (or self)
+        if command.has_binding:
+            callback = functools.partial(command.callback, None, None)
+        else:
+            callback = functools.partial(command.callback, None)
+
+        if not inspect.signature(callback).parameters:
+            # if there are none, notify the command to just pass the ctx and not kwargs
+            # TODO: just make modal callbacks not pass kwargs at all (breaking)
+            command._just_ctx = True
+
         for listener in command.listeners:
-            if listener in self._modal_callbacks.keys():
-                raise ValueError(f"Duplicate Component! Multiple modal callbacks for `{listener}`")
-            self._modal_callbacks[listener] = command
+            if isinstance(listener, re.Pattern):
+                if listener in self._regex_component_callbacks.keys():
+                    raise ValueError(f"Duplicate Component! Multiple modal callbacks for `{listener}`")
+                self._regex_modal_callbacks[listener] = command
+            else:
+                if listener in self._modal_callbacks.keys():
+                    raise ValueError(f"Duplicate Component! Multiple modal callbacks for `{listener}`")
+                self._modal_callbacks[listener] = command
             continue
 
     def add_global_autocomplete(self, callback: GlobalAutoComplete) -> None:
@@ -1308,6 +1474,7 @@ class Client(
 
         Args:
             callback: The autocomplete to add
+
         """
         self._global_autocompletes[callback.option_name] = callback
 
@@ -1317,6 +1484,7 @@ class Client(
 
         Args:
             func: The command to add
+
         """
         if isinstance(func, ModalCommand):
             self.add_modal_callback(func)
@@ -1330,6 +1498,9 @@ class Client(
             self.add_global_autocomplete(func)
         elif not isinstance(func, BaseCommand):
             raise TypeError("Invalid command type")
+
+        for hook in self._add_command_hook:
+            hook(func)
 
         if not func.callback:
             # for group = SlashCommand(...) usage
@@ -1455,6 +1626,7 @@ class Client(
         Raises:
             InteractionMissingAccess: If bot is lacking the necessary access.
             Exception: If there is an error during the synchronization process.
+
         """
         s = time.perf_counter()
         _delete_cmds = self.del_unused_app_cmd if delete_commands is MISSING else delete_commands
@@ -1477,6 +1649,7 @@ class Client(
 
         Returns:
             The scopes to sync.
+
         """
         if scopes is not MISSING:
             return scopes
@@ -1497,6 +1670,7 @@ class Client(
             cmd_scope: The scope to sync.
             delete_cmds: Whether to delete commands.
             local_cmds_json: The local commands in json format.
+
         """
         sync_needed_flag = False
         sync_payload = []
@@ -1523,6 +1697,7 @@ class Client(
 
         Args:
             cmd_scope: The scope to get the commands for.
+
         """
         try:
             return await self.http.get_application_commands(self.app.id, cmd_scope)
@@ -1545,14 +1720,14 @@ class Client(
             cmd_scope: The scope to sync.
             local_cmds_json: The local commands in json format.
             delete_cmds: Whether to delete commands.
+
         """
         sync_payload = []
         sync_needed_flag = False
 
         for local_cmd in self.interactions_by_scope.get(cmd_scope, {}).values():
             remote_cmd_json = next(
-                (v for v in remote_commands if int(v["id"]) == local_cmd.cmd_id.get(cmd_scope)),
-                None,
+                (c for c in remote_commands if int(c["id"]) == int(local_cmd.cmd_id.get(cmd_scope, 0))), None
             )
             local_cmd_json = next((c for c in local_cmds_json[cmd_scope] if c["name"] == str(local_cmd.name)))
 
@@ -1579,6 +1754,7 @@ class Client(
         Args:
             sync_payload: The sync payload.
             cmd_scope: The scope to sync.
+
         """
         self.logger.info(f"Overwriting {cmd_scope} with {len(sync_payload)} application commands")
         sync_response: list[dict] = await self.http.overwrite_application_commands(self.app.id, sync_payload, cmd_scope)
@@ -1655,12 +1831,13 @@ class Client(
             scope: The scope of the command to update
             command_name: The name of the command
             command_id: The ID of the command
+
         """
         if command := self.interactions_by_scope[scope].get(command_name):
             command.cmd_id[scope] = command_id
             self._interaction_lookup[command.resolved_name] = command
 
-    async def get_context(self, data: dict) -> InteractionContext:
+    async def get_context(self, data: dict) -> InteractionContext[Self]:
         match data["type"]:
             case InteractionType.MESSAGE_COMPONENT:
                 cls = self.component_context.from_dict(self, data)
@@ -1688,6 +1865,32 @@ class Client(
                 self.logger.debug(f"Failed to fetch channel data for {data['channel_id']}")
         return cls
 
+    async def handle_pre_ready_response(self, data: dict) -> None:
+        """
+        Respond to an interaction that was received before the bot was ready.
+
+        Args:
+            data: The interaction data
+
+        """
+        if data["type"] == InteractionType.AUTOCOMPLETE:
+            # we do not want to respond to autocompletes as discord will cache the response,
+            # so we just ignore them
+            return
+
+        with contextlib.suppress(HTTPException):
+            await self.http.post_initial_response(
+                {
+                    "type": CallbackType.CHANNEL_MESSAGE_WITH_SOURCE,
+                    "data": {
+                        "content": f"{self.user.display_name} is starting up. Please try again in a few seconds",
+                        "flags": MessageFlags.EPHEMERAL,
+                    },
+                },
+                token=data["token"],
+                interaction_id=data["id"],
+            )
+
     async def _run_slash_command(self, command: SlashCommand, ctx: "InteractionContext") -> Any:
         """Overrideable method that executes slash commands, can be used to wrap callback execution"""
         return await command(ctx, **ctx.kwargs)
@@ -1705,6 +1908,8 @@ class Client(
 
         if not self._startup:
             self.logger.warning("Received interaction before startup completed, ignoring")
+            if self.send_not_ready_messages:
+                await self.handle_pre_ready_response(interaction_data)
             return
 
         if interaction_data["type"] in (
@@ -1727,11 +1932,14 @@ class Client(
 
                 if auto_opt := getattr(ctx, "focussed_option", None):
                     if autocomplete := ctx.command.autocomplete_callbacks.get(str(auto_opt.name)):
-                        callback = autocomplete
+                        if ctx.command.has_binding:
+                            callback = functools.partial(ctx.command.call_with_binding, autocomplete)
+                        else:
+                            callback = autocomplete
                     elif autocomplete := self._global_autocompletes.get(str(auto_opt.name)):
                         callback = autocomplete
                     else:
-                        raise ValueError(f"Autocomplete callback for {str(auto_opt.name)} not found")
+                        raise ValueError(f"Autocomplete callback for {auto_opt.name!s} not found")
 
                     await self.__dispatch_interaction(
                         ctx=ctx,
@@ -1784,8 +1992,18 @@ class Client(
             ctx = await self.get_context(interaction_data)
             self.dispatch(events.ModalCompletion(ctx=ctx))
 
-            if callback := self._modal_callbacks.get(ctx.custom_id):
-                await self.__dispatch_interaction(ctx=ctx, callback=callback(ctx), error_callback=events.ModalError)
+            modal_callback = self._modal_callbacks.get(ctx.custom_id)
+            if not modal_callback:
+                # evaluate regex component callbacks
+                for regex, callback in self._regex_modal_callbacks.items():
+                    if regex.match(ctx.custom_id):
+                        modal_callback = callback
+                        break
+
+            if modal_callback:
+                await self.__dispatch_interaction(
+                    ctx=ctx, callback=modal_callback(ctx), error_callback=events.ModalError
+                )
 
         else:
             raise NotImplementedError(f"Unknown Interaction Received: {interaction_data['type']}")
@@ -1821,7 +2039,7 @@ class Client(
                     await ctx.send(str(response))
 
             if self.post_run_callback:
-                _ = asyncio.create_task(self.post_run_callback(ctx, **callback_kwargs))
+                _ = asyncio.create_task(self.post_run_callback(ctx, **callback_kwargs))  # noqa: RUF006
         except Exception as e:
             self.dispatch(error_callback(ctx=ctx, error=e))
         finally:
@@ -1841,6 +2059,7 @@ class Client(
 
         Returns:
             List of Extensions
+
         """
         if name not in self.ext.keys():
             return [ext for ext in self.ext.values() if ext.extension_name == name]
@@ -1856,6 +2075,7 @@ class Client(
 
         Returns:
             A extension, if found
+
         """
         return ext[0] if (ext := self.get_extensions(name)) else None
 
@@ -1892,7 +2112,7 @@ class Client(
                     asyncio.get_running_loop()
                 except RuntimeError:
                     return
-                _ = asyncio.create_task(self.synchronise_interactions())
+                _ = asyncio.create_task(self.synchronise_interactions())  # noqa: RUF006
 
     def load_extension(
         self,
@@ -1907,6 +2127,7 @@ class Client(
             name: The name of the extension.
             package: The package the extension is in
             **load_kwargs: The auto-filled mapping of the load keyword arguments
+
         """
         module_name = importlib.util.resolve_name(name, package)
         if module_name in self.__modules:
@@ -1914,6 +2135,37 @@ class Client(
 
         module = importlib.import_module(module_name, package)
         self.__load_module(module, module_name, **load_kwargs)
+
+    def load_extensions(
+        self,
+        *packages: str,
+        recursive: bool = False,
+        **load_kwargs: Any,
+    ) -> None:
+        """
+        Load multiple extensions at once.
+
+        Removes the need of manually looping through the package
+        and loading the extensions.
+
+        Args:
+            *packages: The package(s) where the extensions are located.
+            recursive: Whether to load extensions from the subdirectories within the package.
+
+        """
+        if not packages:
+            raise ValueError("You must specify at least one package.")
+
+        for package in packages:
+            # If recursive then include subdirectories ('**')
+            # otherwise just the package specified by the user.
+            pattern = os.path.join(package, "**" if recursive else "", "*.py")
+
+            # Find all files matching the pattern, and convert slashes to dots.
+            extensions = [f.replace(os.path.sep, ".").replace(".py", "") for f in glob.glob(pattern, recursive=True)]
+
+            for ext in extensions:
+                self.load_extension(ext, **load_kwargs)
 
     def unload_extension(
         self, name: str, package: str | None = None, force: bool = False, **unload_kwargs: Any
@@ -1949,7 +2201,7 @@ class Client(
                 asyncio.get_running_loop()
             except RuntimeError:
                 return
-            _ = asyncio.create_task(self.synchronise_interactions())
+            _ = asyncio.create_task(self.synchronise_interactions())  # noqa: RUF006
 
     def reload_extension(
         self,
@@ -2202,9 +2454,28 @@ class Client(
         """
         try:
             scheduled_event_data = await self.http.get_scheduled_event(guild_id, scheduled_event_id, with_user_count)
-            return ScheduledEvent.from_dict(scheduled_event_data, self)
+            return self.cache.place_scheduled_event_data(scheduled_event_data)
         except NotFound:
             return None
+
+    def get_scheduled_event(
+        self,
+        scheduled_event_id: "Snowflake_Type",
+    ) -> Optional["ScheduledEvent"]:
+        """
+        Get a scheduled event by id.
+
+        !!! note
+            This method is an alias for the cache which will return a cached object.
+
+        Args:
+            scheduled_event_id: The ID of the scheduled event to get
+
+        Returns:
+            The scheduled event if found, otherwise None
+
+        """
+        return self.cache.get_scheduled_event(scheduled_event_id)
 
     async def fetch_custom_emoji(
         self, emoji_id: "Snowflake_Type", guild_id: "Snowflake_Type", *, force: bool = False
@@ -2323,6 +2594,99 @@ class Client(
         """
         return self._connection_state.get_voice_state(guild_id)
 
+    async def fetch_entitlements(
+        self,
+        *,
+        user_id: "Optional[Snowflake_Type]" = None,
+        sku_ids: "Optional[list[Snowflake_Type]]" = None,
+        before: "Optional[Snowflake_Type]" = None,
+        after: "Optional[Snowflake_Type]" = None,
+        limit: Optional[int] = 100,
+        guild_id: "Optional[Snowflake_Type]" = None,
+        exclude_ended: Optional[bool] = None,
+    ) -> List[Entitlement]:
+        """
+        Fetch the entitlements for the bot's application.
+
+        Args:
+            user_id: The ID of the user to filter entitlements by.
+            sku_ids: The IDs of the SKUs to filter entitlements by.
+            before: Get entitlements before this ID.
+            after: Get entitlements after this ID.
+            limit: The maximum number of entitlements to return. Maximum is 100.
+            guild_id: The ID of the guild to filter entitlements by.
+            exclude_ended: Whether to exclude ended entitlements.
+
+        Returns:
+            A list of entitlements.
+
+        """
+        entitlements_data = await self.http.get_entitlements(
+            self.app.id,
+            user_id=user_id,
+            sku_ids=sku_ids,
+            before=before,
+            after=after,
+            limit=limit,
+            guild_id=guild_id,
+            exclude_ended=exclude_ended,
+        )
+        return Entitlement.from_list(entitlements_data, self)
+
+    async def create_test_entitlement(
+        self, sku_id: "Snowflake_Type", owner_id: "Snowflake_Type", owner_type: int
+    ) -> Entitlement:
+        """
+        Create a test entitlement for the bot's application.
+
+        Args:
+            sku_id: The ID of the SKU to create the entitlement for.
+            owner_id: The ID of the owner of the entitlement.
+            owner_type: The type of the owner of the entitlement. 1 for a guild subscription, 2 for a user subscription
+
+        Returns:
+            The created entitlement.
+
+        """
+        payload = {"sku_id": to_snowflake(sku_id), "owner_id": to_snowflake(owner_id), "owner_type": owner_type}
+
+        entitlement_data = await self.http.create_test_entitlement(payload, self.app.id)
+        return Entitlement.from_dict(entitlement_data, self)
+
+    async def delete_test_entitlement(self, entitlement_id: "Snowflake_Type") -> None:
+        """
+        Delete a test entitlement for the bot's application.
+
+        Args:
+            entitlement_id: The ID of the entitlement to delete.
+
+        """
+        await self.http.delete_test_entitlement(self.app.id, to_snowflake(entitlement_id))
+
+    async def consume_entitlement(self, entitlement_id: "Snowflake_Type") -> None:
+        """
+        For One-Time Purchase consumable SKUs, marks a given entitlement for the user as consumed.
+
+        Args:
+            entitlement_id: The ID of the entitlement to consume.
+
+        """
+        await self.http.consume_entitlement(self.app.id, entitlement_id)
+
+    def mention_command(self, name: str, scope: int = 0) -> str:
+        """
+        Returns a string that would mention the interaction specified.
+
+        Args:
+            name: The name of the interaction.
+            scope: The scope of the interaction. Defaults to 0, the global scope.
+
+        Returns:
+            str: The interaction's mention in the specified scope.
+
+        """
+        return self.interactions_by_scope[scope][name].mention(scope)
+
     async def change_presence(
         self,
         status: Optional[Union[str, Status]] = Status.ONLINE,
@@ -2336,7 +2700,7 @@ class Client(
             activity: The activity for the bot to be displayed as doing.
 
         !!! note
-            Bots may only be `playing` `streaming` `listening` `watching` or `competing`, other activity types are likely to fail.
+            Bots may only be `playing` `streaming` `listening` `watching`  `competing` or `custom`
 
         """
         await self._connection_state.change_presence(status, activity)

@@ -23,6 +23,7 @@ extras_require["docs"] = extras_require["all"] + [
     "mkdocs-minify-plugin",
     "mkdocs-git-committers-plugin-2",
     "mkdocs-git-revision-date-localized-plugin",
+    "griffe==0.25",
 ]
 extras_require["tests"] = [
     "pytest",
@@ -47,7 +48,7 @@ setup(
     python_requires=">=3.10",
     install_requires=(Path(__file__).parent / "requirements.txt").read_text().splitlines(),
     classifiers=[
-        "Development Status :: 3 - Alpha",
+        "Development Status :: 5 - Production/Stable",
         "Framework :: AsyncIO",
         "Framework :: aiohttp",
         "Intended Audience :: Developers",
@@ -63,7 +64,7 @@ setup(
     ],
     project_urls={
         "Discord": "https://discord.gg/KkgMBVuEkx",
-        "Documentation": "https://naff-docs.readthedocs.io/en/latest/",  # TODO: replace
+        "Documentation": "https://interactions-py.github.io/interactions.py/",
     },
     extras_require=extras_require,
 )

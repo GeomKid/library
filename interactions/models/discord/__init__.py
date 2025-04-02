@@ -2,7 +2,7 @@ from .activity import Activity, ActivityAssets, ActivityParty, ActivitySecrets, 
 from .app_perms import ApplicationCommandPermission
 from .application import Application
 from .asset import Asset
-from .auto_mod import AutoModerationAction, AutoModRule
+from .auto_mod import AutoModerationAction, AutoModRule, TYPE_ALL_ACTION, TYPE_ALL_TRIGGER
 from .channel import (
     BaseChannel,
     ChannelHistory,
@@ -13,6 +13,7 @@ from .channel import (
     GuildChannel,
     GuildForum,
     GuildForumPost,
+    GuildMedia,
     GuildNews,
     GuildNewsThread,
     GuildPrivateThread,
@@ -70,6 +71,7 @@ from .components import (
 
 from .embed import Embed, EmbedAttachment, EmbedAuthor, EmbedField, EmbedFooter, EmbedProvider, process_embeds
 from .emoji import CustomEmoji, PartialEmoji, process_emoji, process_emoji_req_format
+from .entitlement import Entitlement
 from .enums import (
     ActivityFlag,
     ActivityType,
@@ -81,10 +83,12 @@ from .enums import (
     ChannelType,
     CommandType,
     ComponentType,
+    ContextType,
     DefaultNotificationLevel,
     ExplicitContentFilterLevel,
     ForumLayoutType,
     IntegrationExpireBehaviour,
+    IntegrationType,
     Intents,
     InteractionPermissionTypes,
     InteractionType,
@@ -96,8 +100,11 @@ from .enums import (
     MessageType,
     MFALevel,
     NSFWLevel,
+    OnboardingMode,
+    OnboardingPromptType,
     OverwriteType,
     Permissions,
+    PollLayoutType,
     PremiumTier,
     PremiumType,
     ScheduledEventPrivacyLevel,
@@ -113,6 +120,7 @@ from .enums import (
     VerificationLevel,
     VideoQualityMode,
     WebSocketOPCode,
+    ForumSortOrder,
 )
 from .file import File, open_file, UPLOADABLE_TYPE
 from .guild import (
@@ -121,6 +129,7 @@ from .guild import (
     AuditLogEntry,
     AuditLogHistory,
     BaseGuild,
+    BulkBanResponse,
     Guild,
     GuildBan,
     GuildIntegration,
@@ -140,12 +149,15 @@ from .message import (
     Message,
     MessageActivity,
     MessageInteraction,
+    MessageInteractionMetadata,
     MessageReference,
     process_allowed_mentions,
     process_message_payload,
     process_message_reference,
 )
 from .modal import InputText, Modal, ParagraphText, ShortText, TextStyles
+from .onboarding import Onboarding, OnboardingPrompt, OnboardingPromptOption
+from .poll import PollMedia, PollAnswer, PollAnswerCount, PollResults, Poll
 from .reaction import Reaction, ReactionUsers
 from .role import Role
 from .scheduled_event import ScheduledEvent
@@ -160,7 +172,7 @@ from .snowflake import (
 from .stage_instance import StageInstance
 from .sticker import Sticker, StickerItem, StickerPack
 from .team import Team, TeamMember
-from .thread import ThreadList, ThreadMember, ThreadTag
+from .thread import ThreadList, ThreadMember, ThreadTag, DefaultReaction, process_thread_tag, process_default_reaction
 from .timestamp import Timestamp, TimestampStyles
 from .user import BaseUser, Member, User, ClientUser
 from .voice_state import VoiceRegion, VoiceState
@@ -196,6 +208,7 @@ __all__ = (
     "BaseUser",
     "BrandColors",
     "BrandColours",
+    "BulkBanResponse",
     "Button",
     "ButtonStyle",
     "ChannelFlags",
@@ -209,8 +222,10 @@ __all__ = (
     "Colour",
     "CommandType",
     "ComponentType",
+    "ContextType",
     "CustomEmoji",
     "DefaultNotificationLevel",
+    "DefaultReaction",
     "DM",
     "DMChannel",
     "DMGroup",
@@ -220,10 +235,12 @@ __all__ = (
     "EmbedField",
     "EmbedFooter",
     "EmbedProvider",
+    "Entitlement",
     "ExplicitContentFilterLevel",
     "File",
     "FlatUIColors",
     "FlatUIColours",
+    "ForumSortOrder",
     "ForumLayoutType",
     "get_components_ids",
     "Guild",
@@ -233,6 +250,7 @@ __all__ = (
     "GuildForum",
     "GuildForumPost",
     "GuildIntegration",
+    "GuildMedia",
     "GuildNews",
     "GuildNewsThread",
     "GuildPreview",
@@ -248,6 +266,7 @@ __all__ = (
     "GuildWidgetSettings",
     "InputText",
     "IntegrationExpireBehaviour",
+    "IntegrationType",
     "Intents",
     "InteractionPermissionTypes",
     "InteractionType",
@@ -267,29 +286,43 @@ __all__ = (
     "MessageActivityType",
     "MessageFlags",
     "MessageInteraction",
+    "MessageInteractionMetadata",
     "MessageReference",
     "MessageType",
     "MFALevel",
     "Modal",
     "NSFWLevel",
     "open_file",
+    "Onboarding",
+    "OnboardingMode",
+    "OnboardingPrompt",
+    "OnboardingPromptOption",
+    "OnboardingPromptType",
     "OverwriteType",
     "ParagraphText",
     "PartialEmoji",
     "PermissionOverwrite",
     "Permissions",
+    "Poll",
+    "PollAnswer",
+    "PollAnswerCount",
+    "PollLayoutType",
+    "PollMedia",
+    "PollResults",
     "PremiumTier",
     "PremiumType",
     "process_allowed_mentions",
     "process_color",
     "process_colour",
     "process_components",
+    "process_default_reaction",
     "process_embeds",
     "process_emoji",
     "process_emoji_req_format",
     "process_message_payload",
     "process_message_reference",
     "process_permission_overwrites",
+    "process_thread_tag",
     "Reaction",
     "ReactionUsers",
     "Role",
@@ -330,7 +363,9 @@ __all__ = (
     "to_optional_snowflake",
     "to_snowflake",
     "to_snowflake_list",
+    "TYPE_ALL_ACTION",
     "TYPE_ALL_CHANNEL",
+    "TYPE_ALL_TRIGGER",
     "TYPE_CHANNEL_MAPPING",
     "TYPE_COMPONENT_MAPPING",
     "TYPE_DM_CHANNEL",

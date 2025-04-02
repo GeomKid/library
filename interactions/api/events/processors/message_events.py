@@ -83,3 +83,41 @@ class MessageEvents(EventMixinTemplate):
                 event.data.get("ids"),
             )
         )
+
+    @Processor.define()
+    async def _on_raw_message_poll_vote_add(self, event: "RawGatewayEvent") -> None:
+        """
+        Process raw message poll vote add event and dispatch a processed poll vote add event.
+
+        Args:
+            event: raw poll vote add event
+
+        """
+        self.dispatch(
+            events.MessagePollVoteAdd(
+                event.data.get("user_id"),
+                event.data.get("channel_id"),
+                event.data.get("message_id"),
+                event.data.get("answer_id"),
+                event.data.get("guild_id", None),
+            )
+        )
+
+    @Processor.define()
+    async def _on_raw_message_poll_vote_remove(self, event: "RawGatewayEvent") -> None:
+        """
+        Process raw message poll vote remove event and dispatch a processed poll vote remove event.
+
+        Args:
+            event: raw poll vote remove event
+
+        """
+        self.dispatch(
+            events.MessagePollVoteRemove(
+                event.data.get("user_id"),
+                event.data.get("channel_id"),
+                event.data.get("message_id"),
+                event.data.get("answer_id"),
+                event.data.get("guild_id", None),
+            )
+        )

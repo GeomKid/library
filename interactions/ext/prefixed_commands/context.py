@@ -1,12 +1,13 @@
-from typing import Optional, Union, Iterable, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Iterable, Optional, Union
 
 from typing_extensions import Self
 
-from interactions.client.client import Client
+from interactions.client.const import ClientT
 from interactions.client.mixins.send import SendMixin
+from interactions.models.discord.channel import TYPE_MESSAGEABLE_CHANNEL
 from interactions.models.discord.embed import Embed
 from interactions.models.discord.file import UPLOADABLE_TYPE
-from interactions.models.discord.message import Message
+from interactions.models.discord.message import Message, MessageReference
 from interactions.models.internal.context import BaseContext
 from interactions.models.misc.context_manager import Typing
 
@@ -16,7 +17,7 @@ if TYPE_CHECKING:
 __all__ = ("PrefixedContext",)
 
 
-class PrefixedContext(BaseContext, SendMixin):
+class PrefixedContext(BaseContext[ClientT], SendMixin):
     _message: Message
 
     prefix: str
@@ -32,12 +33,12 @@ class PrefixedContext(BaseContext, SendMixin):
     "This is always empty, and is only here for compatibility with other types of commands."
 
     @classmethod
-    def from_dict(cls, client: "Client", payload: dict) -> Self:
+    def from_dict(cls, client: "ClientT", payload: dict) -> Self:
         # this doesn't mean anything, so just implement it to make abc happy
         raise NotImplementedError
 
     @classmethod
-    def from_message(cls, client: "Client", message: Message) -> Self:
+    def from_message(cls, client: "ClientT", message: Message) -> Self:
         instance = cls(client=client)
 
         # hack to work around BaseContext property
@@ -63,6 +64,11 @@ class PrefixedContext(BaseContext, SendMixin):
         return self._message
 
     @property
+    def channel(self) -> TYPE_MESSAGEABLE_CHANNEL:
+        """The channel this context was invoked in."""
+        return self.message.channel
+
+    @property
     def invoke_target(self) -> str:
         """The name of the command to be invoked."""
         return self.command.name
@@ -80,7 +86,8 @@ class PrefixedContext(BaseContext, SendMixin):
         content: Optional[str] = None,
         embeds: Optional[Union[Iterable[Union[Embed, dict]], Union[Embed, dict]]] = None,
         embed: Optional[Union[Embed, dict]] = None,
-        **kwargs,
+        fail_if_not_exists: bool = True,
+        **kwargs: Any,
     ) -> Message:
         """
         Reply to the context's message. Takes all the same attributes as `send`.
@@ -89,10 +96,12 @@ class PrefixedContext(BaseContext, SendMixin):
             content: Message text content.
             embeds: Embedded rich content (up to 6000 characters).
             embed: Embedded rich content (up to 6000 characters).
+            fail_if_not_exists: Whether to error if the command invocation doesn't exist instead of sending as a normal (non-reply) message.
             **kwargs: Additional options to pass to `send`.
 
         Returns:
             New message object.
 
         """
-        return await self.send(content=content, reply_to=self.message, embeds=embeds or embed, **kwargs)
+        ref = MessageReference.for_message(self.message, fail_if_not_exists=fail_if_not_exists)
+        return await self.send(content=content, reply_to=ref, embeds=embeds or embed, **kwargs)

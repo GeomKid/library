@@ -1,4 +1,5 @@
 import asyncio
+from collections import defaultdict
 import inspect
 import re
 import typing
@@ -36,7 +37,7 @@ from interactions.client.utils import optional
 from interactions.client.utils.attr_utils import attrs_validator, docs
 from interactions.client.utils.misc_utils import get_parameters, maybe_coroutine
 from interactions.client.utils.serializer import no_export_meta
-from interactions.models.discord.enums import ChannelType, CommandType, Permissions
+from interactions.models.discord.enums import ChannelType, CommandType, ContextType, IntegrationType, Permissions
 from interactions.models.discord.role import Role
 from interactions.models.discord.snowflake import to_snowflake_list, to_snowflake
 from interactions.models.discord.user import BaseUser
@@ -57,12 +58,14 @@ __all__ = (
     "CallbackType",
     "component_callback",
     "ComponentCommand",
+    "contexts",
     "context_menu",
     "user_context_menu",
     "message_context_menu",
     "ContextMenu",
     "global_autocomplete",
     "GlobalAutoComplete",
+    "integration_types",
     "InteractionCommand",
     "LocalisedDesc",
     "LocalisedName",
@@ -94,6 +97,11 @@ def name_validator(_: Any, attr: Attribute, value: str) -> None:
 def desc_validator(_: Any, attr: Attribute, value: str) -> None:
     if value and not 1 <= len(value) <= SLASH_CMD_MAX_DESC_LENGTH:
         raise ValueError(f"Description must be between 1 and {SLASH_CMD_MAX_DESC_LENGTH} characters long")
+
+
+def custom_ids_validator(*custom_id: str | re.Pattern) -> None:
+    if not (all(isinstance(i, re.Pattern) for i in custom_id) or all(isinstance(i, str) for i in custom_id)):
+        raise ValueError("All custom IDs be either a string or a regex pattern, not a mix of both.")
 
 
 @attrs.define(
@@ -216,7 +224,7 @@ class InteractionCommand(BaseCommand):
         converter=LocalisedName.converter,
     )
     scopes: List["Snowflake_Type"] = attrs.field(
-        default=[GLOBAL_SCOPE],
+        factory=lambda: [GLOBAL_SCOPE],
         converter=to_snowflake_list,
         metadata=docs("The scopes of this interaction. Global or guild ids") | no_export_meta,
     )
@@ -225,7 +233,9 @@ class InteractionCommand(BaseCommand):
         default=None,
         metadata=docs("What permissions members need to have by default to use this command"),
     )
-    dm_permission: bool = attrs.field(repr=False, default=True, metadata=docs("Whether this command is enabled in DMs"))
+    dm_permission: bool = attrs.field(
+        repr=False, default=True, metadata=docs("Whether this command is enabled in DMs (deprecated)") | no_export_meta
+    )
     cmd_id: Dict[str, "Snowflake_Type"] = attrs.field(
         repr=False, factory=dict, metadata=docs("The unique IDs of this commands") | no_export_meta
     )  # scope: cmd_id
@@ -239,16 +249,47 @@ class InteractionCommand(BaseCommand):
         metadata=docs("A system to automatically defer this command after a set duration") | no_export_meta,
     )
     nsfw: bool = attrs.field(repr=False, default=False, metadata=docs("This command should only work in NSFW channels"))
+    integration_types: list[Union[IntegrationType, int]] = attrs.field(
+        factory=lambda: [IntegrationType.GUILD_INSTALL],
+        repr=False,
+        metadata=docs("Installation context(s) where the command is available, only for globally-scoped commands."),
+    )
+    contexts: list[Union[ContextType, int]] = attrs.field(
+        factory=lambda: [ContextType.GUILD, ContextType.BOT_DM, ContextType.PRIVATE_CHANNEL],
+        repr=False,
+        metadata=docs("Interaction context(s) where the command can be used, only for globally-scoped commands."),
+    )
     _application_id: "Snowflake_Type" = attrs.field(repr=False, default=None, converter=optional(to_snowflake))
 
     def __attrs_post_init__(self) -> None:
-        if self.callback is not None and hasattr(self.callback, "auto_defer"):
-            self.auto_defer = self.callback.auto_defer
+        if self.callback is not None:
+            if hasattr(self.callback, "auto_defer"):
+                self.auto_defer = self.callback.auto_defer
+            if hasattr(self.callback, "integration_types"):
+                self.integration_types = self.callback.integration_types
+            if hasattr(self.callback, "contexts"):
+                self.contexts = self.callback.contexts
 
         super().__attrs_post_init__()
 
+    @dm_permission.validator
+    def _dm_permission_validator(self, attribute: str, value: bool) -> None:
+        # since dm_permission is deprecated, ipy transforms it into something that isn't
+        if not value:
+            try:
+                self.contexts.remove(ContextType.PRIVATE_CHANNEL)
+            except ValueError:
+                pass
+
+            try:
+                self.contexts.remove(ContextType.BOT_DM)
+            except ValueError:
+                pass
+
     def to_dict(self) -> dict:
         data = super().to_dict()
+
+        data["name_localizations"] = self.name.to_locale_dict()
 
         if self.default_member_permissions is not None:
             data["default_member_permissions"] = str(int(self.default_member_permissions))
@@ -266,11 +307,12 @@ class InteractionCommand(BaseCommand):
 
         Returns:
             The markdown mention.
+
         """
         if scope:
             cmd_id = self.get_cmd_id(scope=scope)
         else:
-            cmd_id = list(self.cmd_id.values())[0]
+            cmd_id = next(iter(self.cmd_id.values()))
 
         return f"</{self.resolved_name}:{cmd_id}>"
 
@@ -303,6 +345,7 @@ class InteractionCommand(BaseCommand):
 
         Returns:
             Whether this command is enabled in the given context.
+
         """
         if not self.dm_permission and ctx.guild is None:
             return False
@@ -395,6 +438,7 @@ class SlashCommandOption(DictSerializationMixin):
         max_value: The maximum value permitted. The option needs to be an integer or float
         min_length: The minimum length of text a user can input. The option needs to be a string
         max_length: The maximum length of text a user can input. The option needs to be a string
+        argument_name: The name of the argument to be used in the function. If not given, assumed to be the same as the name of the option
 
     """
 
@@ -413,6 +457,7 @@ class SlashCommandOption(DictSerializationMixin):
     max_value: Optional[float] = attrs.field(repr=False, default=None)
     min_length: Optional[int] = attrs.field(repr=False, default=None)
     max_length: Optional[int] = attrs.field(repr=False, default=None)
+    argument_name: Optional[str] = attrs.field(repr=False, default=None)
 
     @type.validator
     def _type_validator(self, attribute: str, value: int) -> None:
@@ -483,6 +528,7 @@ class SlashCommandOption(DictSerializationMixin):
 
     def as_dict(self) -> dict:
         data = attrs.asdict(self)
+        data.pop("argument_name", None)
         data["name"] = str(self.name)
         data["description"] = str(self.description)
         data["choices"] = [
@@ -501,6 +547,11 @@ class SlashCommandParameter:
     kind: inspect._ParameterKind = attrs.field()
     default: typing.Any = attrs.field(default=MISSING)
     converter: typing.Optional[typing.Callable] = attrs.field(default=None)
+    _option_name: typing.Optional[str] = attrs.field(default=None)
+
+    @property
+    def option_name(self) -> str:
+        return self._option_name or self.name
 
 
 def _get_option_from_annotated(annotated: Annotated) -> SlashCommandOption | None:
@@ -522,7 +573,7 @@ def _is_optional(anno: typing.Any) -> bool:
 
 
 def _remove_optional(t: OptionType | type) -> Any:
-    non_optional_args: tuple[type] = tuple(a for a in typing.get_args(t) if a is not types.NoneType)  # noqa
+    non_optional_args: tuple[type] = tuple(a for a in typing.get_args(t) if a is not types.NoneType)
     if len(non_optional_args) == 1:
         return non_optional_args[0]
     return typing.Union[non_optional_args]  # type: ignore
@@ -596,10 +647,14 @@ class SlashCommand(InteractionCommand):
         if not self.options:
             self.options = []
 
-        option.name = name
+        if option.name.default is None:
+            option.name = LocalisedName.converter(name)
+        else:
+            option.argument_name = name
+
         self.options.append(option)
 
-    def _parse_parameters(self) -> None:
+    def _parse_parameters(self) -> None:  # noqa: C901
         """
         Parses the parameters that this command has into a form i.py can use.
 
@@ -660,6 +715,20 @@ class SlashCommand(InteractionCommand):
 
             self.parameters[param.name] = our_param
 
+        if self.options:
+            for option in self.options:
+                maybe_argument_name = (
+                    option.argument_name if isinstance(option, SlashCommandOption) else option.get("argument_name")
+                )
+                if maybe_argument_name:
+                    name = option.name if isinstance(option, SlashCommandOption) else option["name"]
+                    try:
+                        self.parameters[maybe_argument_name]._option_name = str(name)
+                    except KeyError:
+                        raise ValueError(
+                            f'Argument name "{maybe_argument_name}" for "{name}" does not match any parameter in {self.resolved_name}\'s function.'
+                        ) from None
+
     def to_dict(self) -> dict:
         data = super().to_dict()
 
@@ -712,7 +781,7 @@ class SlashCommand(InteractionCommand):
         return wrapper
 
     def group(
-        self, name: str = None, description: str = "No Description Set", inherit_checks: bool = True
+        self, name: str | None = None, description: str = "No Description Set", inherit_checks: bool = True
     ) -> "SlashCommand":
         return SlashCommand(
             name=self.name,
@@ -721,6 +790,8 @@ class SlashCommand(InteractionCommand):
             group_description=description,
             scopes=self.scopes,
             default_member_permissions=self.default_member_permissions,
+            integration_types=self.integration_types,
+            contexts=self.contexts,
             dm_permission=self.dm_permission,
             checks=self.checks.copy() if inherit_checks else [],
         )
@@ -731,7 +802,7 @@ class SlashCommand(InteractionCommand):
         group_name: LocalisedName | str = None,
         sub_cmd_description: Absent[LocalisedDesc | str] = MISSING,
         group_description: Absent[LocalisedDesc | str] = MISSING,
-        options: List[Union[SlashCommandOption, Dict]] = None,
+        options: List[Union[SlashCommandOption, Dict]] | None = None,
         nsfw: bool = False,
         inherit_checks: bool = True,
     ) -> Callable[..., "SlashCommand"]:
@@ -754,6 +825,8 @@ class SlashCommand(InteractionCommand):
                 sub_cmd_name=sub_cmd_name,
                 sub_cmd_description=sub_cmd_description,
                 default_member_permissions=self.default_member_permissions,
+                integration_types=self.integration_types,
+                contexts=self.contexts,
                 dm_permission=self.dm_permission,
                 options=options,
                 callback=call,
@@ -775,8 +848,8 @@ class SlashCommand(InteractionCommand):
         new_args = []
         new_kwargs = {}
 
-        for name, param in self.parameters.items():
-            value = kwargs_copy.pop(name, MISSING)
+        for param in self.parameters.values():
+            value = kwargs_copy.pop(param.option_name, MISSING)
             if value is MISSING:
                 continue
 
@@ -786,7 +859,7 @@ class SlashCommand(InteractionCommand):
             if param.kind == inspect.Parameter.POSITIONAL_ONLY:
                 new_args.append(value)
             else:
-                new_kwargs[name] = value
+                new_kwargs[param.name] = value
 
         # i do want to address one thing: what happens if you have both *args and **kwargs
         # in your argument?
@@ -813,7 +886,12 @@ class ComponentCommand(InteractionCommand):
 
 @attrs.define(eq=False, order=False, hash=False, kw_only=True)
 class ModalCommand(ComponentCommand):
-    ...
+    _just_ctx: bool = attrs.field(repr=False, default=False)
+
+    async def call_callback(self, callback: Callable, context: "BaseContext") -> None:
+        if self._just_ctx:
+            return await self.call_with_binding(callback, context)
+        return await super().call_callback(callback, context)
 
 
 def _unpack_helper(iterable: typing.Iterable[str]) -> list[str]:
@@ -825,6 +903,7 @@ def _unpack_helper(iterable: typing.Iterable[str]) -> list[str]:
 
     Returns:
         A list of strings
+
     """
     unpack = []
     for c in iterable:
@@ -855,6 +934,7 @@ def global_autocomplete(option_name: str) -> Callable[[AsyncCallable], GlobalAut
 
     Returns:
         The decorator
+
     """
 
     def decorator(func: Callable) -> GlobalAutoComplete:
@@ -872,6 +952,8 @@ def slash_command(
     scopes: Absent[List["Snowflake_Type"]] = MISSING,
     options: Optional[List[Union[SlashCommandOption, Dict]]] = None,
     default_member_permissions: Optional["Permissions"] = None,
+    integration_types: Optional[List[Union[IntegrationType, int]]] = None,
+    contexts: Optional[List[Union[ContextType, int]]] = None,
     dm_permission: bool = True,
     sub_cmd_name: str | LocalisedName = None,
     group_name: str | LocalisedName = None,
@@ -893,7 +975,9 @@ def slash_command(
         scopes: The scope this command exists within
         options: The parameters for the command, max 25
         default_member_permissions: What permissions members need to have by default to use this command.
-        dm_permission: Should this command be available in DMs.
+        integration_types: Installation context(s) where the command is available, only for globally-scoped commands.
+        contexts: Interaction context(s) where the command can be used, only for globally-scoped commands.
+        dm_permission: Should this command be available in DMs (deprecated).
         sub_cmd_name: 1-32 character name of the subcommand
         sub_cmd_description: 1-100 character description of the subcommand
         group_name: 1-32 character name of the group
@@ -933,6 +1017,8 @@ def slash_command(
             description=_description,
             scopes=scopes or [GLOBAL_SCOPE],
             default_member_permissions=perm,
+            integration_types=integration_types or [IntegrationType.GUILD_INSTALL],
+            contexts=contexts or [ContextType.GUILD, ContextType.BOT_DM, ContextType.PRIVATE_CHANNEL],
             dm_permission=dm_permission,
             callback=func,
             options=options,
@@ -953,11 +1039,13 @@ def subcommand(
     base_description: Optional[str | LocalisedDesc] = None,
     base_desc: Optional[str | LocalisedDesc] = None,
     base_default_member_permissions: Optional["Permissions"] = None,
+    base_integration_types: Optional[List[Union[IntegrationType, int]]] = None,
+    base_contexts: Optional[List[Union[ContextType, int]]] = None,
     base_dm_permission: bool = True,
     subcommand_group_description: Optional[str | LocalisedDesc] = None,
     sub_group_desc: Optional[str | LocalisedDesc] = None,
-    scopes: List["Snowflake_Type"] = None,
-    options: List[dict] = None,
+    scopes: List["Snowflake_Type"] | None = None,
+    options: List[dict] | None = None,
     nsfw: bool = False,
 ) -> Callable[[AsyncCallable], SlashCommand]:
     """
@@ -971,7 +1059,9 @@ def subcommand(
         base_description: The description of the base command
         base_desc: An alias of `base_description`
         base_default_member_permissions: What permissions members need to have by default to use this command.
-        base_dm_permission: Should this command be available in DMs.
+        base_integration_types: Installation context(s) where the command is available, only for globally-scoped commands.
+        base_contexts: Interaction context(s) where the command can be used, only for globally-scoped commands.
+        base_dm_permission: Should this command be available in DMs (deprecated).
         subcommand_group_description: Description of the subcommand group
         sub_group_desc: An alias for `subcommand_group_description`
         scopes: The scopes of which this command is available, defaults to GLOBAL_SCOPE
@@ -1003,6 +1093,8 @@ def subcommand(
             sub_cmd_name=_name,
             sub_cmd_description=_description,
             default_member_permissions=base_default_member_permissions,
+            integration_types=base_integration_types or [IntegrationType.GUILD_INSTALL],
+            contexts=base_contexts or [ContextType.GUILD, ContextType.BOT_DM, ContextType.PRIVATE_CHANNEL],
             dm_permission=base_dm_permission,
             scopes=scopes or [GLOBAL_SCOPE],
             callback=func,
@@ -1020,6 +1112,8 @@ def context_menu(
     context_type: "CommandType",
     scopes: Absent[List["Snowflake_Type"]] = MISSING,
     default_member_permissions: Optional["Permissions"] = None,
+    integration_types: Optional[List[Union[IntegrationType, int]]] = None,
+    contexts: Optional[List[Union[ContextType, int]]] = None,
     dm_permission: bool = True,
 ) -> Callable[[AsyncCallable], ContextMenu]:
     """
@@ -1030,7 +1124,9 @@ def context_menu(
         context_type: The type of context menu
         scopes: The scope this command exists within
         default_member_permissions: What permissions members need to have by default to use this command.
-        dm_permission: Should this command be available in DMs.
+        integration_types: Installation context(s) where the command is available, only for globally-scoped commands.
+        contexts: Interaction context(s) where the command can be used, only for globally-scoped commands.
+        dm_permission: Should this command be available in DMs (deprecated).
 
     Returns:
         ContextMenu object
@@ -1057,6 +1153,8 @@ def context_menu(
             type=context_type,
             scopes=scopes or [GLOBAL_SCOPE],
             default_member_permissions=perm,
+            integration_types=integration_types or [IntegrationType.GUILD_INSTALL],
+            contexts=contexts or [ContextType.GUILD, ContextType.BOT_DM, ContextType.PRIVATE_CHANNEL],
             dm_permission=dm_permission,
             callback=func,
         )
@@ -1070,6 +1168,8 @@ def user_context_menu(
     *,
     scopes: Absent[List["Snowflake_Type"]] = MISSING,
     default_member_permissions: Optional["Permissions"] = None,
+    integration_types: Optional[List[Union[IntegrationType, int]]] = None,
+    contexts: Optional[List[Union[ContextType, int]]] = None,
     dm_permission: bool = True,
 ) -> Callable[[AsyncCallable], ContextMenu]:
     """
@@ -1079,7 +1179,9 @@ def user_context_menu(
         name: 1-32 character name of the context menu, defaults to the name of the coroutine.
         scopes: The scope this command exists within
         default_member_permissions: What permissions members need to have by default to use this command.
-        dm_permission: Should this command be available in DMs.
+        integration_types: Installation context(s) where the command is available, only for globally-scoped commands.
+        contexts: Interaction context(s) where the command can be used, only for globally-scoped commands.
+        dm_permission: Should this command be available in DMs (deprecated).
 
     Returns:
         ContextMenu object
@@ -1090,6 +1192,8 @@ def user_context_menu(
         context_type=CommandType.USER,
         scopes=scopes,
         default_member_permissions=default_member_permissions,
+        integration_types=integration_types or [IntegrationType.GUILD_INSTALL],
+        contexts=contexts or [ContextType.GUILD, ContextType.BOT_DM, ContextType.PRIVATE_CHANNEL],
         dm_permission=dm_permission,
     )
 
@@ -1099,6 +1203,8 @@ def message_context_menu(
     *,
     scopes: Absent[List["Snowflake_Type"]] = MISSING,
     default_member_permissions: Optional["Permissions"] = None,
+    integration_types: Optional[List[Union[IntegrationType, int]]] = None,
+    contexts: Optional[List[Union[ContextType, int]]] = None,
     dm_permission: bool = True,
 ) -> Callable[[AsyncCallable], ContextMenu]:
     """
@@ -1108,7 +1214,9 @@ def message_context_menu(
         name: 1-32 character name of the context menu, defaults to the name of the coroutine.
         scopes: The scope this command exists within
         default_member_permissions: What permissions members need to have by default to use this command.
-        dm_permission: Should this command be available in DMs.
+        integration_types: Installation context(s) where the command is available, only for globally-scoped commands.
+        contexts: Interaction context(s) where the command can be used, only for globally-scoped commands.
+        dm_permission: Should this command be available in DMs (deprecated).
 
     Returns:
         ContextMenu object
@@ -1119,6 +1227,8 @@ def message_context_menu(
         context_type=CommandType.MESSAGE,
         scopes=scopes,
         default_member_permissions=default_member_permissions,
+        integration_types=integration_types or [IntegrationType.GUILD_INSTALL],
+        contexts=contexts or [ContextType.GUILD, ContextType.BOT_DM, ContextType.PRIVATE_CHANNEL],
         dm_permission=dm_permission,
     )
 
@@ -1131,7 +1241,9 @@ def component_callback(*custom_id: str | re.Pattern) -> Callable[[AsyncCallable]
     Your callback will be given a single argument, `ComponentContext`
 
     Note:
-        This can optionally take a regex pattern, which will be used to match against the custom ID of the component
+        This can optionally take a regex pattern, which will be used to match against the custom ID of the component.
+
+        If you do not supply a `custom_id`, the name of the coroutine will be used instead.
 
     Args:
         *custom_id: The custom ID of the component to wait for
@@ -1139,35 +1251,48 @@ def component_callback(*custom_id: str | re.Pattern) -> Callable[[AsyncCallable]
     """
 
     def wrapper(func: AsyncCallable) -> ComponentCommand:
+        resolved_custom_id = custom_id or [func.__name__]
+
         if not asyncio.iscoroutinefunction(func):
             raise ValueError("Commands must be coroutines")
 
-        return ComponentCommand(name=f"ComponentCallback::{custom_id}", callback=func, listeners=custom_id)
+        return ComponentCommand(
+            name=f"ComponentCallback::{resolved_custom_id}", callback=func, listeners=resolved_custom_id
+        )
 
     custom_id = _unpack_helper(custom_id)
-    if not (all(isinstance(i, re.Pattern) for i in custom_id) or all(isinstance(i, str) for i in custom_id)):
-        raise ValueError("All custom IDs be either a string or a regex pattern, not a mix of both.")
+    custom_ids_validator(*custom_id)
     return wrapper
 
 
-def modal_callback(*custom_id: str) -> Callable[[AsyncCallable], ModalCommand]:
+def modal_callback(*custom_id: str | re.Pattern) -> Callable[[AsyncCallable], ModalCommand]:
     """
     Register a coroutine as a modal callback.
 
     Modal callbacks work the same way as commands, just using modals as a way of invoking, instead of messages.
     Your callback will be given a single argument, `ModalContext`
 
+    Note:
+        This can optionally take a regex pattern, which will be used to match against the custom ID of the modal.
+
+        If you do not supply a `custom_id`, the name of the coroutine will be used instead.
+
+
     Args:
         *custom_id: The custom ID of the modal to wait for
+
     """
 
     def wrapper(func: AsyncCallable) -> ModalCommand:
+        resolved_custom_id = custom_id or [func.__name__]
+
         if not asyncio.iscoroutinefunction(func):
             raise ValueError("Commands must be coroutines")
 
-        return ModalCommand(name=f"ModalCallback::{custom_id}", callback=func, listeners=custom_id)
+        return ModalCommand(name=f"ModalCallback::{resolved_custom_id}", callback=func, listeners=resolved_custom_id)
 
     custom_id = _unpack_helper(custom_id)
+    custom_ids_validator(*custom_id)
     return wrapper
 
 
@@ -1181,12 +1306,13 @@ def slash_option(
     opt_type: Union[OptionType, int],
     required: bool = False,
     autocomplete: bool = False,
-    choices: List[Union[SlashCommandChoice, dict]] = None,
+    choices: List[Union[SlashCommandChoice, dict]] | None = None,
     channel_types: Optional[list[Union[ChannelType, int]]] = None,
     min_value: Optional[float] = None,
     max_value: Optional[float] = None,
     min_length: Optional[int] = None,
     max_length: Optional[int] = None,
+    argument_name: Optional[str] = None,
 ) -> Callable[[SlashCommandT], SlashCommandT]:
     r"""
     A decorator to add an option to a slash command.
@@ -1203,6 +1329,8 @@ def slash_option(
         max_value: The maximum value permitted. The option needs to be an integer or float
         min_length: The minimum length of text a user can input. The option needs to be a string
         max_length: The maximum length of text a user can input. The option needs to be a string
+        argument_name: The name of the argument to be used in the function. If not given, assumed to be the same as the name of the option
+
     """
 
     def wrapper(func: SlashCommandT) -> SlashCommandT:
@@ -1221,6 +1349,7 @@ def slash_option(
             max_value=max_value,
             min_length=min_length,
             max_length=max_length,
+            argument_name=argument_name,
         )
         if not hasattr(func, "options"):
             func.options = []
@@ -1278,6 +1407,59 @@ def auto_defer(
     return wrapper
 
 
+def integration_types(guild: bool = True, user: bool = False) -> Callable[[InterCommandT], InterCommandT]:
+    """
+    A decorator to set integration types for an application command.
+
+    Args:
+        guild: Should the command be available for guilds
+        user: Should the command be available for individual users
+
+    """
+    kwargs = locals()
+
+    def wrapper(func: InterCommandT) -> InterCommandT:
+        if hasattr(func, "cmd_id"):
+            raise ValueError("integration_types decorators must be positioned under a command decorator")
+
+        func.integration_types = []
+        for key in kwargs:
+            if kwargs[key]:
+                func.integration_types.append(IntegrationType[key.upper() + "_INSTALL"])
+
+        return func
+
+    return wrapper
+
+
+def contexts(
+    guild: bool = True, bot_dm: bool = True, private_channel: bool = True
+) -> Callable[[InterCommandT], InterCommandT]:
+    """
+    A decorator to set contexts where the command can be used for a application command.
+
+    Args:
+        guild: Should the command be available in guilds
+        bot_dm: Should the command be available in bot DMs
+        private_channel: Should the command be available in private channels
+
+    """
+    kwargs = locals()
+
+    def wrapper(func: InterCommandT) -> InterCommandT:
+        if hasattr(func, "cmd_id"):
+            raise ValueError("contexts decorators must be positioned under a command decorator")
+
+        func.contexts = []
+        for key in kwargs:
+            if kwargs[key]:
+                func.contexts.append(ContextType[key.upper()])
+
+        return func
+
+    return wrapper
+
+
 def application_commands_to_dict(  # noqa: C901
     commands: Dict["Snowflake_Type", Dict[str, InteractionCommand]], client: "Client"
 ) -> dict:
@@ -1287,9 +1469,9 @@ def application_commands_to_dict(  # noqa: C901
     `Client.interactions` should be the variable passed to this
 
     """
-    cmd_bases = {}  # {cmd_base: [commands]}
+    cmd_bases: defaultdict[str, list[InteractionCommand]] = defaultdict(list)  # {cmd_base: [commands]}
     """A store of commands organised by their base command"""
-    output = {}
+    output: defaultdict["Snowflake_Type", list[dict]] = defaultdict(list)
     """The output dictionary"""
 
     def squash_subcommand(subcommands: List) -> Dict:
@@ -1302,10 +1484,13 @@ def application_commands_to_dict(  # noqa: C901
                     "name": str(subcommand.name),
                     "description": str(subcommand.description),
                     "options": [],
-                    "default_member_permissions": str(int(subcommand.default_member_permissions))
-                    if subcommand.default_member_permissions
-                    else None,
-                    "dm_permission": subcommand.dm_permission,
+                    "default_member_permissions": (
+                        str(int(subcommand.default_member_permissions))
+                        if subcommand.default_member_permissions
+                        else None
+                    ),
+                    "integration_types": subcommand.integration_types,
+                    "contexts": subcommand.contexts,
                     "name_localizations": subcommand.name.to_locale_dict(),
                     "description_localizations": subcommand.description.to_locale_dict(),
                     "nsfw": subcommand.nsfw,
@@ -1332,9 +1517,6 @@ def application_commands_to_dict(  # noqa: C901
     for _scope, cmds in commands.items():
         for cmd in cmds.values():
             cmd_name = str(cmd.name)
-            if cmd_name not in cmd_bases:
-                cmd_bases[cmd_name] = [cmd]
-                continue
             if cmd not in cmd_bases[cmd_name]:
                 cmd_bases[cmd_name].append(cmd)
 
@@ -1354,10 +1536,14 @@ def application_commands_to_dict(  # noqa: C901
 
             if any(str(c.description) not in (str(base_description), "No Description Set") for c in cmd_list):
                 client.logger.warning(
-                    f"Conflicting descriptions found in `{cmd_list[0].name}` subcommands; `{str(base_description)}` will be used"
+                    f"Conflicting descriptions found in `{cmd_list[0].name}` subcommands; `{base_description!s}` will be used"
                 )
             if any(c.default_member_permissions != cmd_list[0].default_member_permissions for c in cmd_list):
                 raise ValueError(f"Conflicting `default_member_permissions` values found in `{cmd_list[0].name}`")
+            if any(c.contexts != cmd_list[0].contexts for c in cmd_list):
+                raise ValueError(f"Conflicting `contexts` values found in `{cmd_list[0].name}`")
+            if any(c.integration_types != cmd_list[0].integration_types for c in cmd_list):
+                raise ValueError(f"Conflicting `integration_types` values found in `{cmd_list[0].name}`")
             if any(c.dm_permission != cmd_list[0].dm_permission for c in cmd_list):
                 raise ValueError(f"Conflicting `dm_permission` values found in `{cmd_list[0].name}`")
             if any(c.nsfw != nsfw for c in cmd_list):
@@ -1370,15 +1556,14 @@ def application_commands_to_dict(  # noqa: C901
                 cmd.nsfw = nsfw
             # end validation of attributes
             cmd_data = squash_subcommand(cmd_list)
+
+            for s in scopes:
+                output[s].append(cmd_data)
         else:
-            scopes = cmd_list[0].scopes
-            cmd_data = cmd_list[0].to_dict()
-        for s in scopes:
-            if s not in output:
-                output[s] = [cmd_data]
-                continue
-            output[s].append(cmd_data)
-    return output
+            for cmd in cmd_list:
+                for s in cmd.scopes:
+                    output[s].append(cmd.to_dict())
+    return dict(output)
 
 
 def _compare_commands(local_cmd: dict, remote_cmd: dict) -> bool:
@@ -1391,18 +1576,20 @@ def _compare_commands(local_cmd: dict, remote_cmd: dict) -> bool:
 
     Returns:
         True if the commands are the same
+
     """
     lookup: dict[str, tuple[str, any]] = {
         "name": ("name", ""),
         "description": ("description", ""),
         "default_member_permissions": ("default_member_permissions", None),
-        "dm_permission": ("dm_permission", True),
         "name_localized": ("name_localizations", None),
         "description_localized": ("description_localizations", None),
+        "integration_types": ("integration_types", [IntegrationType.GUILD_INSTALL]),
+        "contexts": ("contexts", [ContextType.GUILD, ContextType.BOT_DM, ContextType.PRIVATE_CHANNEL]),
     }
     if remote_cmd.get("guild_id"):
         # non-global command
-        del lookup["dm_permission"]
+        del lookup["contexts"]
 
     for local_name, comparison_data in lookup.items():
         remote_name, default_value = comparison_data
@@ -1465,6 +1652,7 @@ def sync_needed(local_cmd: dict, remote_cmd: Optional[dict] = None) -> bool:
 
     Returns:
         Boolean indicating if a sync is needed
+
     """
     if not remote_cmd:
         # No remote version, command must be new

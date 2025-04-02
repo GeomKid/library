@@ -15,7 +15,7 @@ from .base import DiscordObject
 from .enums import ScheduledEventPrivacyLevel, ScheduledEventType, ScheduledEventStatus
 
 if TYPE_CHECKING:
-    from interactions.client import Client
+    from interactions.client.client import Client
     from interactions.models.discord.channel import GuildStageVoice, GuildVoice
     from interactions.models.discord.guild import Guild
     from interactions.models.discord.user import Member
@@ -49,7 +49,7 @@ class ScheduledEvent(DiscordObject):
     """The id of an entity associated with a guild scheduled event"""
     entity_metadata: Optional[Dict[str, Any]] = attrs.field(repr=False, default=MISSING)  # TODO make this
     """The metadata associated with the entity_type"""
-    user_count: int = attrs.field(repr=False, default=MISSING)
+    user_count: Absent[int] = attrs.field(repr=False, default=MISSING)  # TODO make this optional and None in 6.0
     """Amount of users subscribed to the scheduled event"""
     cover: Asset | None = attrs.field(repr=False, default=None)
     """The cover image of this event"""
@@ -108,6 +108,7 @@ class ScheduledEvent(DiscordObject):
 
         Args:
             force: Whether to force fetch the channel from the API
+
         """
         if self._channel_id:
             return await self._client.cache.fetch_channel(self._channel_id, force=force)

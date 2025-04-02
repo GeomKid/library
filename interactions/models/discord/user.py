@@ -51,7 +51,9 @@ class BaseUser(DiscordObject, _SendDMMixin):
     global_name: str | None = attrs.field(
         repr=True, metadata=docs("The user's chosen display name, platform-wide"), default=None
     )
-    discriminator: int = attrs.field(repr=True, metadata=docs("The user's 4-digit discord-tag"))
+    discriminator: str = attrs.field(
+        repr=True, metadata=docs("The user's 4-digit discord-tag"), default="0"
+    )  # will likely be removed in future api version
     avatar: "Asset" = attrs.field(repr=False, metadata=docs("The user's default avatar"))
 
     def __str__(self) -> str:
@@ -62,6 +64,8 @@ class BaseUser(DiscordObject, _SendDMMixin):
         if not isinstance(data["avatar"], Asset):
             if data["avatar"]:
                 data["avatar"] = Asset.from_path_hash(client, f"avatars/{data['id']}/{{}}", data["avatar"])
+            elif data["discriminator"] == "0":
+                data["avatar"] = Asset(client, f"{Asset.BASE}/embed/avatars/{(int(data['id']) >> 22) % 6}")
             else:
                 data["avatar"] = Asset(client, f"{Asset.BASE}/embed/avatars/{int(data['discriminator']) % 5}")
         return data
@@ -69,6 +73,8 @@ class BaseUser(DiscordObject, _SendDMMixin):
     @property
     def tag(self) -> str:
         """Returns the user's Discord tag."""
+        if self.discriminator == "0":
+            return f"@{self.username}"
         return f"{self.username}#{self.discriminator}"
 
     @property
@@ -97,6 +103,7 @@ class BaseUser(DiscordObject, _SendDMMixin):
 
         Args:
             force: Whether to force a fetch from the API
+
         """
         return await self._client.cache.fetch_dm_channel(self.id, force=force)
 
@@ -232,12 +239,28 @@ class ClientUser(User):
         """The guilds the user is in."""
         return list(filter(None, (self._client.cache.get_guild(guild_id) for guild_id in self._guild_ids)))
 
-    async def edit(self, *, username: Absent[str] = MISSING, avatar: Absent[UPLOADABLE_TYPE] = MISSING) -> None:
+    @property
+    def guild_count(self) -> int:
+        """
+        Returns the number of guilds the bot is in.
+
+        This function is faster than using `len(client_user.guilds)` as it does not require using the cache.
+        As such, this is preferred when you only need the count of guilds.
+        """
+        return len(self._guild_ids or ())
+
+    async def edit(
+        self,
+        *,
+        username: Absent[str] = MISSING,
+        avatar: Absent[UPLOADABLE_TYPE] = MISSING,
+        banner: Absent[UPLOADABLE_TYPE] = MISSING,
+    ) -> None:
         """
         Edit the client's user.
 
-        You can either change the username, or avatar, or both at once.
-        `avatar` may be set to `None` to remove your bot's avatar
+        You can change the username, avatar, and banner, or any combination of the three.
+        `avatar` and `banner` may be set to `None` to remove your bot's avatar/banner
 
         ??? Hint "Example Usage:"
             ```python
@@ -251,6 +274,7 @@ class ClientUser(User):
         Args:
             username: The username you want to use
             avatar: The avatar to use. Can be a image file, path, or `bytes` (see example)
+            banner: The banner to use. Can be a image file, path, or `bytes`
 
         Raises:
             TooManyChanges: If you change the profile too many times
@@ -263,6 +287,10 @@ class ClientUser(User):
             payload["avatar"] = to_image_data(avatar)
         elif avatar is None:
             payload["avatar"] = None
+        if banner:
+            payload["banner"] = to_image_data(banner)
+        elif banner is None:
+            payload["banner"] = None
 
         try:
             resp = await self._client.http.modify_client_user(payload)
@@ -406,6 +434,11 @@ class Member(DiscordObject, _SendDMMixin):
     def display_avatar(self) -> "Asset":
         """The users displayed avatar, will return `guild_avatar` if one is set, otherwise will return user avatar."""
         return self.guild_avatar or self.user.avatar
+
+    @property
+    def avatar_url(self) -> str:
+        """The users avatar url."""
+        return self.display_avatar.url
 
     @property
     def premium(self) -> bool:
@@ -586,6 +619,16 @@ class Member(DiscordObject, _SendDMMixin):
         """
         return all(to_snowflake(role) in self._role_ids for role in roles)
 
+    def has_any_role(self, roles: List[Union[Snowflake_Type, Role]]) -> bool:
+        """
+        Checks if the user has any of the given roles.
+
+        Args:
+            *roles: The Role(s) or role id(s) to check for
+
+        """
+        return any((self.has_role(to_snowflake(role)) for role in roles))
+
     async def timeout(
         self,
         communication_disabled_until: Union["Timestamp", datetime, int, float, str, None],
@@ -621,6 +664,10 @@ class Member(DiscordObject, _SendDMMixin):
         """
         await self._client.http.modify_guild_member(self._guild_id, self.id, channel_id=channel_id)
 
+    async def disconnect(self) -> None:
+        """Disconnects the member from the voice channel."""
+        await self._client.http.modify_guild_member(self._guild_id, self.id, channel_id=None)
+
     async def edit(
         self,
         *,
@@ -630,6 +677,7 @@ class Member(DiscordObject, _SendDMMixin):
         deaf: Absent[bool] = MISSING,
         channel_id: Absent["Snowflake_Type"] = MISSING,
         communication_disabled_until: Absent[Union["Timestamp", None]] = MISSING,
+        flags: Absent[int] = MISSING,
         reason: Absent[str] = MISSING,
     ) -> None:
         """
@@ -642,7 +690,9 @@ class Member(DiscordObject, _SendDMMixin):
             deaf: Whether the user is deafened in voice channels
             channel_id: id of channel to move user to (if they are connected to voice)
             communication_disabled_until: 	when the user's timeout will expire and the user will be able to communicate in the guild again
+            flags: Represents the guild member flags
             reason: An optional reason for the audit log
+
         """
         await self._client.http.modify_guild_member(
             self._guild_id,
@@ -653,6 +703,7 @@ class Member(DiscordObject, _SendDMMixin):
             deaf=deaf,
             channel_id=channel_id,
             communication_disabled_until=communication_disabled_until,
+            flags=flags,
             reason=reason,
         )
 

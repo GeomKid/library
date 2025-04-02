@@ -2,6 +2,7 @@ import inspect
 import re
 import typing
 from enum import IntFlag
+from interactions.models.discord.snowflake import Snowflake
 from typing import Any, Dict, Union, Optional
 
 import aiohttp  # type: ignore
@@ -25,8 +26,8 @@ elif importlib.util.find_spec("msgspec"):
     import msgspec.json as json
 
     def enc_hook(obj: Any) -> int:
-        # msgspec doesnt support IntFlags
-        if isinstance(obj, IntFlag):
+        # msgspec doesnt support IntFlags or interactions.Snowflakes
+        if isinstance(obj, (IntFlag, Snowflake)):
             return int(obj)
         raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
 
@@ -35,7 +36,7 @@ elif importlib.util.find_spec("msgspec"):
 
     json_mode = "msgspec"
 else:
-    import json
+    import json  # type: ignore
 
 get_logger().debug(f"Using {json_mode} for JSON encoding and decoding.")
 
@@ -133,6 +134,7 @@ def unpack_helper(iterable: typing.Iterable) -> list[Any]:
         iterable: The iterable to unpack
     Returns:
         A flattened list
+
     """
     unpack = []
     for c in iterable:

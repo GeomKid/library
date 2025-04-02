@@ -1,3 +1,4 @@
+import asyncio
 import re
 from enum import IntEnum
 from typing import Optional, TYPE_CHECKING, Union, Dict, Any, List
@@ -5,7 +6,7 @@ from typing import Optional, TYPE_CHECKING, Union, Dict, Any, List
 import attrs
 
 from interactions.client.const import MISSING, Absent
-from interactions.client.errors import ForeignWebhookException, EmptyMessageException
+from interactions.client.errors import ForeignWebhookException, EmptyMessageException, NotFound
 from interactions.client.mixins.send import SendMixin
 from interactions.client.utils.serializer import to_image_data
 from interactions.models.discord.message import process_message_payload
@@ -26,6 +27,7 @@ if TYPE_CHECKING:
         Message,
         MessageReference,
     )
+    from interactions.models.discord.poll import Poll
     from interactions.models.discord.sticker import Sticker
 
 __all__ = ("WebhookTypes", "Webhook")
@@ -189,10 +191,12 @@ class Webhook(DiscordObject, SendMixin):
         tts: bool = False,
         suppress_embeds: bool = False,
         flags: Optional[Union[int, "MessageFlags"]] = None,
-        username: str = None,
-        avatar_url: str = None,
+        poll: "Optional[Poll | dict]" = None,
+        username: str | None = None,
+        avatar_url: str | None = None,
         wait: bool = False,
         thread: "Snowflake_Type" = None,
+        thread_name: Optional[str] = None,
         **kwargs,
     ) -> Optional["Message"]:
         """
@@ -211,10 +215,12 @@ class Webhook(DiscordObject, SendMixin):
             tts: Should this message use Text To Speech.
             suppress_embeds: Should embeds be suppressed on this send
             flags: Message flags to apply.
+            poll: A poll.
             username: The username to use
             avatar_url: The url of an image to use as the avatar
             wait: Waits for confirmation of delivery. Set this to True if you intend to edit the message
-            thread: Send this webhook to a thread channel
+            thread: Send this webhook to a thread channel. Note that this cannot be used with `thread_name` set
+            thread_name: Create a thread with `thread_name` with this webhook. Note that this is only valid for forum channel and cannot be used with `thread` set
 
         Returns:
             New message object that was sent if `wait` is set to True
@@ -225,6 +231,11 @@ class Webhook(DiscordObject, SendMixin):
 
         if not content and not embeds and not embed and not files and not file and not stickers:
             raise EmptyMessageException("You cannot send a message without any content, embeds, files, or stickers")
+
+        if thread is not None and thread_name is not None:
+            raise ValueError(
+                "You cannot create a thread and send the message to another thread with a webhook at the same time!"
+            )
 
         if suppress_embeds:
             if isinstance(flags, int):
@@ -240,6 +251,7 @@ class Webhook(DiscordObject, SendMixin):
             reply_to=reply_to,
             tts=tts,
             flags=flags,
+            poll=poll,
             username=username,
             avatar_url=avatar_url,
             **kwargs,
@@ -251,10 +263,29 @@ class Webhook(DiscordObject, SendMixin):
             message_payload,
             wait,
             to_optional_snowflake(thread),
+            thread_name,
             files=files or file,
         )
         if message_data:
             return self._client.cache.place_message_data(message_data)
+
+    async def fetch_message(self, message_id: Union["Message", "Snowflake_Type"]) -> Optional["Message"]:
+        """
+        Returns a previously-sent webhook message from the same token. Returns a message object on success.
+
+        Args:
+            message_id: ID of message to retrieve.
+
+        Returns:
+            The message object fetched. If the message is not found, returns None.
+
+        """
+        message_id = to_snowflake(message_id)
+        try:
+            msg_data = await self._client.http.get_webhook_message(self.id, self.token, message_id)
+        except NotFound:
+            return None
+        return self._client.cache.place_message_data(msg_data)
 
     async def edit_message(
         self,
@@ -313,3 +344,29 @@ class Webhook(DiscordObject, SendMixin):
         )
         if msg_data:
             return self._client.cache.place_message_data(msg_data)
+
+    async def delete_message(
+        self,
+        message: Union["Message", "Snowflake_Type"],
+        *,
+        delay: int = 0,
+    ) -> None:
+        """
+        Delete a message as this webhook.
+
+        Args:
+            message: Message to delete
+            delay: Seconds to wait before deleting message.
+
+        """
+
+        async def _delete() -> None:
+            if delay:
+                await asyncio.sleep(delay)
+
+            await self._client.http.delete_webhook_message(self.id, self.token, to_snowflake(message))
+
+        if delay:
+            return asyncio.create_task(_delete())
+
+        return await _delete()

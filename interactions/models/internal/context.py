@@ -1,14 +1,18 @@
 import abc
 import datetime
 import re
+import contextlib
 import typing
 from typing_extensions import Self
 
 import discord_typings
 from aiohttp import FormData
-from interactions.client.const import get_logger, MISSING
+
+from interactions.client import const
+from interactions.client.const import get_logger, MISSING, ClientT
 from interactions.models.discord.components import BaseComponent
 from interactions.models.discord.file import UPLOADABLE_TYPE
+from interactions.models.discord.poll import Poll
 from interactions.models.discord.sticker import Sticker
 from interactions.models.discord.user import Member, User
 
@@ -17,12 +21,15 @@ from interactions.client.mixins.modal import ModalMixin
 
 from interactions.client.errors import HTTPException, AlreadyDeferred, AlreadyResponded
 from interactions.client.mixins.send import SendMixin
+from interactions.models.discord.entitlement import Entitlement
 from interactions.models.discord.enums import (
     Permissions,
     MessageFlags,
     InteractionType,
     ComponentType,
     CommandType,
+    ContextType,
+    IntegrationType,
 )
 from interactions.models.discord.message import (
     AllowedMentions,
@@ -33,9 +40,11 @@ from interactions.models.discord.message import (
 )
 from interactions.models.discord.snowflake import Snowflake, Snowflake_Type, to_snowflake, to_optional_snowflake
 from interactions.models.discord.embed import Embed
+from interactions.models.discord.timestamp import Timestamp
 from interactions.models.internal.application_commands import (
     OptionType,
     CallbackType,
+    SlashCommandChoice,
     SlashCommandOption,
     InteractionCommand,
 )
@@ -68,6 +77,7 @@ class Resolved:
         roles: A dictionary of roles resolved from the interaction.
         messages: A dictionary of messages resolved from the interaction.
         attachments: A dictionary of attachments resolved from the interaction.
+
     """
 
     def __init__(self) -> None:
@@ -139,16 +149,13 @@ class Resolved:
         return instance
 
 
-class BaseContext(metaclass=abc.ABCMeta):
+class BaseContext(typing.Generic[ClientT], metaclass=abc.ABCMeta):
     """
     Base context class for all contexts.
 
     Define your own context class by inheriting from this class. For compatibility with the library, you must define a `from_dict` classmethod that takes a dict and returns an instance of your context class.
 
     """
-
-    client: "interactions.Client"
-    """The client that created this context."""
 
     command: BaseCommand
     """The command this context invokes."""
@@ -163,8 +170,10 @@ class BaseContext(metaclass=abc.ABCMeta):
     guild_id: typing.Optional[Snowflake]
     """The id of the guild this context was invoked in, if any."""
 
-    def __init__(self, client: "interactions.Client") -> None:
-        self.client = client
+    def __init__(self, client: ClientT) -> None:
+        self.client: ClientT = client
+        """The client that created this context."""
+
         self.author_id = MISSING
         self.channel_id = MISSING
         self.message_id = MISSING
@@ -208,12 +217,12 @@ class BaseContext(metaclass=abc.ABCMeta):
         return self.client.cache.get_bot_voice_state(self.guild_id)
 
     @property
-    def bot(self) -> "interactions.Client":
+    def bot(self) -> "ClientT":
         return self.client
 
     @classmethod
     @abc.abstractmethod
-    def from_dict(cls, client: "interactions.Client", payload: dict) -> Self:
+    def from_dict(cls, client: "ClientT", payload: dict) -> Self:
         """
         Create a context instance from a dict.
 
@@ -228,14 +237,12 @@ class BaseContext(metaclass=abc.ABCMeta):
         raise NotImplementedError
 
 
-class BaseInteractionContext(BaseContext):
+class BaseInteractionContext(BaseContext[ClientT]):
     token: str
     """The interaction token."""
     id: Snowflake
     """The interaction ID."""
 
-    app_permissions: Permissions
-    """The permissions available to this interaction"""
     locale: str
     """The selected locale of the invoking user (https://discord.com/developers/docs/reference#locales)"""
     guild_locale: str
@@ -251,36 +258,55 @@ class BaseInteractionContext(BaseContext):
     ephemeral: bool
     """Whether the interaction response is ephemeral."""
 
+    authorizing_integration_owners: dict[IntegrationType, Snowflake]
+    """Mapping of installation contexts that the interaction was authorized for to related user or guild IDs"""
+    context: typing.Optional[ContextType]
+    """Context where the interaction was triggered from"""
+
+    entitlements: list[Entitlement]
+    """The entitlements of the invoking user."""
+
     _context_type: int
-    """The context type of the interaction."""
+    """The type of the interaction."""
     command_id: Snowflake
     """The command ID of the interaction."""
     _command_name: str
     """The command name of the interaction."""
+
+    permission_map: dict[Snowflake, Permissions]
 
     args: list[typing.Any]
     """The arguments passed to the interaction."""
     kwargs: dict[str, typing.Any]
     """The keyword arguments passed to the interaction."""
 
-    def __init__(self, client: "interactions.Client") -> None:
+    def __init__(self, client: "ClientT") -> None:
         super().__init__(client)
         self.deferred = False
         self.responded = False
         self.ephemeral = False
 
     @classmethod
-    def from_dict(cls, client: "interactions.Client", payload: dict) -> Self:
+    def from_dict(cls, client: "ClientT", payload: dict) -> Self:
         instance = cls(client=client)
         instance.token = payload["token"]
         instance.id = Snowflake(payload["id"])
-        instance.app_permissions = Permissions(payload.get("app_permissions", 0))
+        instance.permission_map = {client.app.id: Permissions(payload.get("app_permissions", 0))}
         instance.locale = payload["locale"]
         instance.guild_locale = payload.get("guild_locale", instance.locale)
         instance._context_type = payload.get("type", 0)
         instance.resolved = Resolved.from_dict(client, payload["data"].get("resolved", {}), payload.get("guild_id"))
+        instance.entitlements = Entitlement.from_list(payload.get("entitlements", []), client)
+        instance.context = ContextType(payload["context"]) if payload.get("context") else None
+        instance.authorizing_integration_owners = {
+            IntegrationType(int(integration_type)): Snowflake(owner_id)
+            for integration_type, owner_id in payload.get("authorizing_integration_owners", {}).items()
+        }
 
         instance.channel_id = Snowflake(payload["channel_id"])
+        if channel := payload.get("channel"):
+            client.cache.place_channel_data(channel)
+
         if member := payload.get("member"):
             instance.author_id = Snowflake(member["user"]["id"])
             instance.guild_id = Snowflake(payload["guild_id"])
@@ -301,23 +327,38 @@ class BaseInteractionContext(BaseContext):
 
         instance.process_options(payload)
 
+        if member := payload.get("member"):
+            instance.permission_map[Snowflake(member["id"])] = Permissions(member["permissions"])
+
         return instance
 
     @property
-    def command(self) -> InteractionCommand:
-        return self.client._interaction_lookup[self._command_name]
+    def app_permissions(self) -> Permissions:
+        """The permissions available to this interaction"""
+        return self.permission_map.get(self.client.app.id, Permissions(0))
 
     @property
-    def expires_at(self) -> typing.Optional[datetime.datetime]:
+    def author_permissions(self) -> Permissions:
+        """The permissions available to the author of this interaction"""
+        if self.guild_id:
+            return self.permission_map.get(self.author_id, Permissions(0))
+        return Permissions(0)
+
+    @property
+    def command(self) -> typing.Optional[InteractionCommand]:
+        return self.client._interaction_lookup.get(self._command_name)
+
+    @property
+    def expires_at(self) -> Timestamp:
         """The time at which the interaction expires."""
-        if self.responded:
+        if self.responded or self.deferred:
             return self.id.created_at + datetime.timedelta(minutes=15)
         return self.id.created_at + datetime.timedelta(seconds=3)
 
     @property
     def expired(self) -> bool:
         """Whether the interaction has expired."""
-        return datetime.datetime.utcnow() > self.expires_at
+        return Timestamp.utcnow() > self.expires_at
 
     @property
     def invoke_target(self) -> str:
@@ -376,14 +417,29 @@ class BaseInteractionContext(BaseContext):
         self.args = list(self.kwargs.values())
 
 
-class InteractionContext(BaseInteractionContext, SendMixin):
-    async def defer(self, *, ephemeral: bool = False) -> None:
+class InteractionContext(BaseInteractionContext[ClientT], SendMixin):
+    async def defer(self, *, ephemeral: bool = False, suppress_error: bool = False) -> None:
         """
         Defer the interaction.
 
+        Note:
+            This method's ephemeral settings override the ephemeral settings of `send()`.
+
+            For example, deferring with `ephemeral=True` will make the response ephemeral even with
+            `send(ephemeral=False)`.
+
         Args:
             ephemeral: Whether the interaction response should be ephemeral.
+            suppress_error: Should errors on deferring be suppressed than raised.
+
         """
+        if suppress_error:
+            with contextlib.suppress(AlreadyDeferred, AlreadyResponded, HTTPException):
+                await self._defer(ephemeral=ephemeral)
+        else:
+            await self._defer(ephemeral=ephemeral)
+
+    async def _defer(self, *, ephemeral: bool = False) -> None:
         if self.deferred:
             raise AlreadyDeferred("Interaction has already been responded to.")
         if self.responded:
@@ -397,9 +453,34 @@ class InteractionContext(BaseInteractionContext, SendMixin):
         self.deferred = True
         self.ephemeral = ephemeral
 
+    async def send_premium_required(self) -> None:
+        """
+        Send a premium required response.
+
+        !!! warn
+            This response has been deprecated by Discord and will be removed in the future.
+            Use a button with the PREMIUM type instead.
+
+        When used, the user will be prompted to subscribe to premium to use this feature.
+        Only available for applications with monetization enabled.
+        """
+        if self.responded:
+            raise RuntimeError("Cannot send a premium required response after responding")
+
+        await self.client.http.post_initial_response({"type": 10}, self.id, self.token)
+        self.responded = True
+
     async def _send_http_request(
         self, message_payload: dict, files: typing.Iterable["UPLOADABLE_TYPE"] | None = None
     ) -> dict:
+        if const.has_client_feature("FOLLOWUP_INTERACTIONS_FOR_IMAGES") and not self.deferred and not self.responded:
+            # experimental bypass for discords broken image proxy
+            if embeds := message_payload.get("embeds", {}):
+                if any(e.get("image") for e in embeds) or any(e.get("thumbnail") for e in embeds):
+                    if MessageFlags.EPHEMERAL in message_payload.get("flags", MessageFlags.NONE):
+                        self.ephemeral = True
+                    await self.defer(ephemeral=self.ephemeral)
+
         if self.responded:
             message_data = await self.client.http.post_followup(
                 message_payload, self.client.app.id, self.token, files=files
@@ -408,9 +489,14 @@ class InteractionContext(BaseInteractionContext, SendMixin):
             if isinstance(message_payload, FormData) and not self.deferred:
                 await self.defer(ephemeral=self.ephemeral)
             if self.deferred:
-                message_data = await self.client.http.edit_interaction_message(
-                    message_payload, self.client.app.id, self.token, files=files
-                )
+                if const.has_client_feature("FOLLOWUP_INTERACTIONS_FOR_IMAGES"):
+                    message_data = await self.client.http.post_followup(
+                        message_payload, self.client.app.id, self.token, files=files
+                    )
+                else:
+                    message_data = await self.client.http.edit_interaction_message(
+                        message_payload, self.client.app.id, self.token, files=files
+                    )
             else:
                 payload = {
                     "type": CallbackType.CHANNEL_MESSAGE_WITH_SOURCE,
@@ -458,6 +544,7 @@ class InteractionContext(BaseInteractionContext, SendMixin):
         suppress_embeds: bool = False,
         silent: bool = False,
         flags: typing.Optional[typing.Union[int, "MessageFlags"]] = None,
+        poll: "typing.Optional[Poll | dict]" = None,
         delete_after: typing.Optional[float] = None,
         ephemeral: bool = False,
         **kwargs: typing.Any,
@@ -479,11 +566,13 @@ class InteractionContext(BaseInteractionContext, SendMixin):
             suppress_embeds: Should embeds be suppressed on this send
             silent: Should this message be sent without triggering a notification.
             flags: Message flags to apply.
+            poll: A poll.
             delete_after: Delete message after this many seconds.
             ephemeral: Whether the response should be ephemeral
 
         Returns:
             New message object that was sent.
+
         """
         flags = MessageFlags(flags or 0)
         if ephemeral:
@@ -506,24 +595,29 @@ class InteractionContext(BaseInteractionContext, SendMixin):
             file=file,
             tts=tts,
             flags=flags,
+            poll=poll,
             delete_after=delete_after,
+            pass_self_into_delete=True,
             **kwargs,
         )
 
     respond = send
 
-    async def delete(self, message: "Snowflake_Type") -> None:
+    async def delete(self, message: "Snowflake_Type" = "@original") -> None:
         """
         Delete a message sent in response to this interaction.
 
         Args:
-            message: The message to delete
+            message: The message to delete. Defaults to @original which represents the initial response message.
+
         """
-        await self.client.http.delete_interaction_message(self.client.app.id, self.token, to_snowflake(message))
+        await self.client.http.delete_interaction_message(
+            self.client.app.id, self.token, to_snowflake(message) if message != "@original" else message
+        )
 
     async def edit(
         self,
-        message: "Snowflake_Type",
+        message: "Snowflake_Type" = "@original",
         *,
         content: typing.Optional[str] = None,
         embeds: typing.Optional[
@@ -546,7 +640,7 @@ class InteractionContext(BaseInteractionContext, SendMixin):
     ) -> "interactions.Message":
         message_payload = process_message_payload(
             content=content,
-            embeds=embeds or embed,
+            embeds=embed if embeds is None else embeds,
             components=components,
             allowed_mentions=allowed_mentions,
             attachments=attachments,
@@ -559,20 +653,20 @@ class InteractionContext(BaseInteractionContext, SendMixin):
             payload=message_payload,
             application_id=self.client.app.id,
             token=self.token,
-            message_id=to_snowflake(message),
+            message_id=to_snowflake(message) if message != "@original" else message,
             files=files,
         )
         if message_data:
             return self.client.cache.place_message_data(message_data)
 
 
-class SlashContext(InteractionContext, ModalMixin):
+class SlashContext(InteractionContext[ClientT], ModalMixin):
     @classmethod
-    def from_dict(cls, client: "interactions.Client", payload: dict) -> Self:
+    def from_dict(cls, client: "ClientT", payload: dict) -> Self:
         return super().from_dict(client, payload)
 
 
-class ContextMenuContext(InteractionContext, ModalMixin):
+class ContextMenuContext(InteractionContext[ClientT], ModalMixin):
     target_id: Snowflake
     """The id of the target of the context menu."""
     editing_origin: bool
@@ -580,34 +674,51 @@ class ContextMenuContext(InteractionContext, ModalMixin):
     target_type: None | CommandType
     """The type of the target of the context menu."""
 
-    def __init__(self, client: "interactions.Client") -> None:
+    def __init__(self, client: "ClientT") -> None:
         super().__init__(client)
         self.editing_origin = False
 
     @classmethod
-    def from_dict(cls, client: "interactions.Client", payload: dict) -> Self:
+    def from_dict(cls, client: "ClientT", payload: dict) -> Self:
         instance = super().from_dict(client, payload)
         instance.target_id = Snowflake(payload["data"]["target_id"])
         instance.target_type = CommandType(payload["data"]["type"])
         return instance
 
-    async def defer(self, *, ephemeral: bool = False, edit_origin: bool = False) -> None:
+    async def defer(self, *, ephemeral: bool = False, edit_origin: bool = False, suppress_error: bool = False) -> None:
         """
         Defer the interaction.
+
+        Note:
+            This method's ephemeral settings override the ephemeral settings of `send()`.
+
+            For example, deferring with `ephemeral=True` will make the response ephemeral even with
+            `send(ephemeral=False)`.
 
         Args:
             ephemeral: Whether the interaction response should be ephemeral.
             edit_origin: Whether to edit the original message instead of sending a new one.
+            suppress_error: Should errors on deferring be suppressed than raised.
+
         """
+        if suppress_error:
+            with contextlib.suppress(AlreadyDeferred, AlreadyResponded, HTTPException):
+                await self._defer(ephemeral=ephemeral, edit_origin=edit_origin)
+        else:
+            await self._defer(ephemeral=ephemeral, edit_origin=edit_origin)
+
+    async def _defer(self, *, ephemeral: bool = False, edit_origin: bool = False) -> None:
         if self.deferred:
             raise AlreadyDeferred("Interaction has already been responded to.")
         if self.responded:
             raise AlreadyResponded("Interaction has already been responded to.")
 
         payload = {
-            "type": CallbackType.DEFERRED_UPDATE_MESSAGE
-            if edit_origin
-            else CallbackType.DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE
+            "type": (
+                CallbackType.DEFERRED_UPDATE_MESSAGE
+                if edit_origin
+                else CallbackType.DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE
+            )
         }
         if ephemeral:
             if edit_origin:
@@ -626,11 +737,12 @@ class ContextMenuContext(InteractionContext, ModalMixin):
 
         Returns:
             The target of the context menu.
+
         """
         return self.resolved.get(self.target_id)
 
 
-class ComponentContext(InteractionContext, ModalMixin):
+class ComponentContext(InteractionContext[ClientT], ModalMixin):
     values: list[str]
     """The values of the SelectMenu component, if any."""
     custom_id: str
@@ -641,7 +753,7 @@ class ComponentContext(InteractionContext, ModalMixin):
     """Whether you have deferred the interaction and are editing the original response."""
 
     @classmethod
-    def from_dict(cls, client: "interactions.Client", payload: dict) -> Self:
+    def from_dict(cls, client: "ClientT", payload: dict) -> Self:
         instance = super().from_dict(client, payload)
         instance.values = payload["data"].get("values", [])
         instance.custom_id = payload["data"]["custom_id"]
@@ -681,23 +793,40 @@ class ComponentContext(InteractionContext, ModalMixin):
                         instance.values[i] = channel
         return instance
 
-    async def defer(self, *, ephemeral: bool = False, edit_origin: bool = False) -> None:
+    async def defer(self, *, ephemeral: bool = False, edit_origin: bool = False, suppress_error: bool = False) -> None:
         """
         Defer the interaction.
+
+        Note:
+            This method's ephemeral settings override the ephemeral settings of `send()`.
+
+            For example, deferring with `ephemeral=True` will make the response ephemeral even with
+            `send(ephemeral=False)`.
 
         Args:
             ephemeral: Whether the interaction response should be ephemeral.
             edit_origin: Whether to edit the original message instead of sending a new one.
+            suppress_error: Should errors on deferring be suppressed than raised.
+
         """
+        if suppress_error:
+            with contextlib.suppress(AlreadyDeferred, AlreadyResponded, HTTPException):
+                await self._defer(ephemeral=ephemeral, edit_origin=edit_origin)
+        else:
+            await self._defer(ephemeral=ephemeral, edit_origin=edit_origin)
+
+    async def _defer(self, *, ephemeral: bool = False, edit_origin: bool = False) -> None:
         if self.deferred:
             raise AlreadyDeferred("Interaction has already been responded to.")
         if self.responded:
             raise AlreadyResponded("Interaction has already been responded to.")
 
         payload = {
-            "type": CallbackType.DEFERRED_UPDATE_MESSAGE
-            if edit_origin
-            else CallbackType.DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE
+            "type": (
+                CallbackType.DEFERRED_UPDATE_MESSAGE
+                if edit_origin
+                else CallbackType.DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE
+            )
         }
         if ephemeral:
             if edit_origin:
@@ -745,6 +874,7 @@ class ComponentContext(InteractionContext, ModalMixin):
 
         Returns:
             The message after it was edited.
+
         """
         if not self.responded and not self.deferred and (files or file):
             # Discord doesn't allow files at initial response, so we defer then edit.
@@ -752,7 +882,7 @@ class ComponentContext(InteractionContext, ModalMixin):
 
         message_payload = process_message_payload(
             content=content,
-            embeds=embeds or embed,
+            embeds=embed if embeds is None else embeds,
             components=components,
             allowed_mentions=allowed_mentions,
             tts=tts,
@@ -766,18 +896,21 @@ class ComponentContext(InteractionContext, ModalMixin):
                 )
 
             message_data = await self.client.http.edit_interaction_message(
-                message_payload, self.client.app.id, self.token, files=files or file
+                message_payload, self.client.app.id, self.token, files=file if files is None else files
             )
             self.deferred = False
             self.editing_origin = False
         else:
             payload = {"type": CallbackType.UPDATE_MESSAGE, "data": message_payload}
-            await self.client.http.post_initial_response(payload, str(self.id), self.token, files=files or file)
+            await self.client.http.post_initial_response(
+                payload, str(self.id), self.token, files=file if files is None else files
+            )
             message_data = await self.client.http.get_interaction_message(self.client.app.id, self.token)
 
         if message_data:
             message = self.client.cache.place_message_data(message_data)
             self.message_id = message.id
+            self.responded = True
             return message
 
     @property
@@ -791,7 +924,7 @@ class ComponentContext(InteractionContext, ModalMixin):
                     return component
 
 
-class ModalContext(InteractionContext):
+class ModalContext(InteractionContext[ClientT]):
     responses: dict[str, str]
     """The responses of the modal. The key is the `custom_id` of the component."""
     custom_id: str
@@ -800,7 +933,7 @@ class ModalContext(InteractionContext):
     """Whether to edit the original message instead of sending a new one."""
 
     @classmethod
-    def from_dict(cls, client: "interactions.Client", payload: dict) -> Self:
+    def from_dict(cls, client: "ClientT", payload: dict) -> Self:
         instance = super().from_dict(client, payload)
         instance.responses = {
             comp["components"][0]["custom_id"]: comp["components"][0]["value"] for comp in payload["data"]["components"]
@@ -815,23 +948,40 @@ class ModalContext(InteractionContext):
             await self.defer(edit_origin=True)
         return await super().edit(message, **kwargs)
 
-    async def defer(self, *, ephemeral: bool = False, edit_origin: bool = False) -> None:
+    async def defer(self, *, ephemeral: bool = False, edit_origin: bool = False, suppress_error: bool = False) -> None:
         """
         Defer the interaction.
+
+        Note:
+            This method's ephemeral settings override the ephemeral settings of `send()`.
+
+            For example, deferring with `ephemeral=True` will make the response ephemeral even with
+            `send(ephemeral=False)`.
 
         Args:
             ephemeral: Whether the interaction response should be ephemeral.
             edit_origin: Whether to edit the original message instead of sending a followup.
+            suppress_error: Should errors on deferring be suppressed than raised.
+
         """
+        if suppress_error:
+            with contextlib.suppress(AlreadyDeferred, AlreadyResponded, HTTPException):
+                await self._defer(ephemeral=ephemeral, edit_origin=edit_origin)
+        else:
+            await self._defer(ephemeral=ephemeral, edit_origin=edit_origin)
+
+    async def _defer(self, *, ephemeral: bool = False, edit_origin: bool = False) -> None:
         if self.deferred:
             raise AlreadyDeferred("Interaction has already been responded to.")
         if self.responded:
             raise AlreadyResponded("Interaction has already been responded to.")
 
         payload = {
-            "type": CallbackType.DEFERRED_UPDATE_MESSAGE
-            if edit_origin
-            else CallbackType.DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE
+            "type": (
+                CallbackType.DEFERRED_UPDATE_MESSAGE
+                if edit_origin
+                else CallbackType.DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE
+            )
         }
         if ephemeral:
             payload["data"] = {"flags": MessageFlags.EPHEMERAL}
@@ -844,12 +994,12 @@ class ModalContext(InteractionContext):
         self.ephemeral = ephemeral
 
 
-class AutocompleteContext(BaseInteractionContext):
+class AutocompleteContext(BaseInteractionContext[ClientT]):
     focussed_option: SlashCommandOption  # todo: option parsing
     """The option the user is currently filling in."""
 
     @classmethod
-    def from_dict(cls, client: "interactions.Client", payload: dict) -> Self:
+    def from_dict(cls, client: "ClientT", payload: dict) -> Self:
         return super().from_dict(client, payload)
 
     @property
@@ -862,7 +1012,9 @@ class AutocompleteContext(BaseInteractionContext):
             self.focussed_option = SlashCommandOption.from_dict(option)
         return
 
-    async def send(self, choices: typing.Iterable[str | int | float | dict[str, int | float | str]]) -> None:
+    async def send(
+        self, choices: typing.Iterable[str | int | float | dict[str, int | float | str] | SlashCommandChoice]
+    ) -> None:
         """
         Send your autocomplete choices to discord. Choices must be either a list of strings, or a dictionary following the following format:
 
@@ -877,6 +1029,7 @@ class AutocompleteContext(BaseInteractionContext):
 
         Args:
             choices: 25 choices the user can pick
+
         """
         if self.focussed_option.type == OptionType.STRING:
             type_cast = str
@@ -892,6 +1045,9 @@ class AutocompleteContext(BaseInteractionContext):
             if isinstance(choice, dict):
                 name = choice["name"]
                 value = choice["value"]
+            elif isinstance(choice, SlashCommandChoice):
+                name = choice.name.get_locale(self.locale)
+                value = choice.value
             else:
                 name = str(choice)
                 value = choice

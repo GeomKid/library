@@ -1,6 +1,7 @@
 import asyncio
 import platform
 import tracemalloc
+from typing import ClassVar
 
 from interactions import (
     Client,
@@ -28,7 +29,7 @@ class DebugExtension(DebugExec, DebugAppCMD, DebugExts, Extension):
         description = "Debugging utilities for interactions.py"
         version = "1.0.0"
         url = "https://github.com/interactions-py/interactions.py"
-        requirements = ["interactions>=5.0.0"]
+        requirements: ClassVar[list] = ["interactions>=5.0.0"]
 
     def __init__(self, bot: Client) -> None:
         bot.logger.info("Debug Extension is mounting!")
@@ -75,7 +76,7 @@ class DebugExtension(DebugExec, DebugAppCMD, DebugExts, Extension):
 
         e.add_field("Loaded Exts", ", ".join(self.bot.ext))
 
-        e.add_field("Guilds", str(len(self.bot.guilds)))
+        e.add_field("Guilds", str(self.bot.guild_count))
 
         await ctx.send(embeds=[e])
 
