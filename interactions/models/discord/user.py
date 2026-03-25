@@ -30,7 +30,7 @@ if TYPE_CHECKING:
     from interactions.models.discord.channel import DM, TYPE_GUILD_CHANNEL
     from interactions.models.discord.voice_state import VoiceState
 
-__all__ = ("BaseUser", "User", "ClientUser", "Member")
+__all__ = ("BaseUser", "ClientUser", "Member", "User")
 
 
 class _SendDMMixin(SendMixin):
@@ -171,7 +171,7 @@ class User(BaseUser):
         if any(field in data for field in ("banner", "accent_color", "avatar_decoration")):
             data["_fetched"] = True
 
-        if "banner" in data:
+        if data.get("banner", None):
             data["banner"] = Asset.from_path_hash(client, f"banners/{data['id']}/{{}}", data["banner"])
 
         if data.get("premium_type", None) is None:

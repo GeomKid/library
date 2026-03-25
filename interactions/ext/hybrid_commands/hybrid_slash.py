@@ -134,7 +134,7 @@ class RangeConverter(Converter[float | int]):
 
     async def convert(self, ctx: BaseContext, argument: str) -> float | int:
         try:
-            converted: float | int = await maybe_coroutine(self.number_convert, ctx, argument)
+            converted: float | int = await maybe_coroutine(self.number_convert, argument)
 
             if self.min_value and converted < self.min_value:
                 raise BadArgument(f'Value "{argument}" is less than {self.min_value}.')
@@ -269,6 +269,8 @@ class HybridSlashCommand(SlashCommand):
             group_description=description,
             scopes=self.scopes,
             default_member_permissions=self.default_member_permissions,
+            integration_types=self.integration_types,
+            contexts=self.contexts,
             dm_permission=self.dm_permission,
             checks=self.checks.copy() if inherit_checks else [],
             aliases=aliases or [],
@@ -306,6 +308,8 @@ class HybridSlashCommand(SlashCommand):
                 sub_cmd_name=sub_cmd_name,
                 sub_cmd_description=sub_cmd_description,
                 default_member_permissions=self.default_member_permissions,
+                integration_types=self.integration_types,
+                contexts=self.contexts,
                 dm_permission=self.dm_permission,
                 options=options,
                 callback=call,

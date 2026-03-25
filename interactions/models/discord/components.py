@@ -1,7 +1,9 @@
+from collections import UserList
 import contextlib
 import uuid
 from abc import abstractmethod
-from typing import Any, Dict, Iterator, List, Optional, Union, TYPE_CHECKING
+from typing import Any, Dict, Iterator, List, Optional, Sequence, Union, TYPE_CHECKING, overload
+from typing_extensions import Self
 
 import attrs
 import discord_typings
@@ -11,31 +13,90 @@ from interactions.models.discord.snowflake import Snowflake, Snowflake_Type
 from interactions.client.const import ACTION_ROW_MAX_ITEMS, MISSING
 from interactions.client.mixins.serialization import DictSerializationMixin
 from interactions.models.discord.base import DiscordObject
+from interactions.models.discord.color import Color, process_color
 from interactions.models.discord.emoji import PartialEmoji, process_emoji
-from interactions.models.discord.enums import ButtonStyle, ChannelType, ComponentType
+from interactions.models.discord.enums import (
+    ButtonStyle,
+    ChannelType,
+    ComponentType,
+    SeparatorSpacingSize,
+    UnfurledMediaItemLoadingState,
+)
 
 if TYPE_CHECKING:
     import interactions.models.discord
 
 __all__ = (
-    "BaseComponent",
-    "InteractiveComponent",
+    "TYPE_COMPONENT_MAPPING",
     "ActionRow",
-    "Button",
+    "BaseComponent",
     "BaseSelectMenu",
+    "Button",
+    "ChannelSelectMenu",
+    "ContainerComponent",
+    "DefaultableSelectMenu",
+    "FileComponent",
+    "InteractiveComponent",
+    "MediaGalleryComponent",
+    "MediaGalleryItem",
+    "MentionableSelectMenu",
+    "RoleSelectMenu",
+    "SectionComponent",
+    "SelectDefaultValues",
+    "SeparatorComponent",
     "StringSelectMenu",
     "StringSelectOption",
+    "TextDisplayComponent",
+    "ThumbnailComponent",
+    "UnfurledMediaItem",
     "UserSelectMenu",
-    "RoleSelectMenu",
-    "MentionableSelectMenu",
-    "ChannelSelectMenu",
+    "get_components_ids",
     "process_components",
     "spread_to_rows",
-    "get_components_ids",
-    "TYPE_COMPONENT_MAPPING",
-    "SelectDefaultValues",
-    "DefaultableSelectMenu",
 )
+
+
+class UnfurledMediaItem(DictSerializationMixin):
+    """
+    A basic object for making media items.
+
+    Attributes:
+        url str: The source url of the media.
+        proxy_url Optional[str]: A proxied url of the media. Only present when provided by Discord.
+        height Optional[int]: The height of the media. Only present when provided by Discord.
+        width Optional[int]: The width of the media. Only present when provided by Discord.
+        content_type Optional[str]: The content type of the media. Only present when provided by Discord.
+        loading_state Optional[UnfurledMediaItemLoadingState]: The loading state of the media.
+
+    """
+
+    url: str
+    proxy_url: Optional[str] = None
+    height: Optional[int] = None
+    width: Optional[int] = None
+    content_type: Optional[str] = None
+    loading_state: Optional[UnfurledMediaItemLoadingState] = None
+
+    def __init__(self, url: str):
+        self.url = url
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "UnfurledMediaItem":
+        item = cls(data["url"])
+        item.proxy_url = data.get("proxy_url")
+        item.height = data.get("height")
+        item.width = data.get("width")
+        item.content_type = data.get("content_type")
+        item.loading_state = (
+            UnfurledMediaItemLoadingState(data.get("loading_state")) if data.get("loading_state") else None
+        )
+        return item
+
+    def __repr__(self) -> str:
+        return f"<{self.__class__.__name__} url={self.url}>"
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {"url": self.url}
 
 
 class BaseComponent(DictSerializationMixin):
@@ -48,6 +109,7 @@ class BaseComponent(DictSerializationMixin):
     """
 
     type: ComponentType
+    id: Optional[int] = None
 
     def __repr__(self) -> str:
         return f"<{self.__class__.__name__} type={self.type}>"
@@ -521,12 +583,12 @@ class StringSelectMenu(BaseSelectMenu):
 
     Attributes:
         options List[dict]: The choices in the select, max 25.
-        custom_id str: A developer-defined identifier for the button, max 100 characters.
+        custom_id str: A developer-defined identifier for the select, max 100 characters.
         placeholder str: The custom placeholder text to show if nothing is selected, max 100 characters.
         min_values Optional[int]: The minimum number of items that must be chosen. (default 1, min 0, max 25)
         max_values Optional[int]: The maximum number of items that can be chosen. (default 1, max 25)
         disabled bool: Disable the select and make it not intractable, default false.
-        type Union[ComponentType, int]: The action role type number defined by discord. This cannot be modified.
+        type Union[ComponentType, int]: The type of component, as defined by discord. This cannot be modified.
 
     """
 
@@ -582,12 +644,13 @@ class UserSelectMenu(DefaultableSelectMenu):
     Represents a user select component.
 
     Attributes:
-        custom_id str: A developer-defined identifier for the button, max 100 characters.
         placeholder str: The custom placeholder text to show if nothing is selected, max 100 characters.
         min_values Optional[int]: The minimum number of items that must be chosen. (default 1, min 0, max 25)
         max_values Optional[int]: The maximum number of items that can be chosen. (default 1, max 25)
+        custom_id str: A developer-defined identifier for the select, max 100 characters.
+        default_values list[BaseUser, Member, SelectDefaultValues]: A list of default values to pre-select in the select.
         disabled bool: Disable the select and make it not intractable, default false.
-        type Union[ComponentType, int]: The action role type number defined by discord. This cannot be modified.
+        type Union[ComponentType, int]: The type of component, as defined by discord. This cannot be modified.
 
     """
 
@@ -602,8 +665,6 @@ class UserSelectMenu(DefaultableSelectMenu):
             list[
                 Union[
                     "interactions.models.discord.BaseUser",
-                    "interactions.models.discord.Role",
-                    "interactions.models.discord.BaseChannel",
                     "interactions.models.discord.Member",
                     SelectDefaultValues,
                 ],
@@ -626,15 +687,16 @@ class UserSelectMenu(DefaultableSelectMenu):
 
 class RoleSelectMenu(DefaultableSelectMenu):
     """
-    Represents a user select component.
+    Represents a role select component.
 
     Attributes:
-        custom_id str: A developer-defined identifier for the button, max 100 characters.
         placeholder str: The custom placeholder text to show if nothing is selected, max 100 characters.
         min_values Optional[int]: The minimum number of items that must be chosen. (default 1, min 0, max 25)
         max_values Optional[int]: The maximum number of items that can be chosen. (default 1, max 25)
+        custom_id str: A developer-defined identifier for the select, max 100 characters.
+        default_values list[Role, SelectDefaultValues]: A list of default values to pre-select in the select.
         disabled bool: Disable the select and make it not intractable, default false.
-        type Union[ComponentType, int]: The action role type number defined by discord. This cannot be modified.
+        type Union[ComponentType, int]: The type of component, as defined by discord. This cannot be modified.
 
     """
 
@@ -649,10 +711,7 @@ class RoleSelectMenu(DefaultableSelectMenu):
         default_values: (
             list[
                 Union[
-                    "interactions.models.discord.BaseUser",
                     "interactions.models.discord.Role",
-                    "interactions.models.discord.BaseChannel",
-                    "interactions.models.discord.Member",
                     SelectDefaultValues,
                 ],
             ]
@@ -672,6 +731,20 @@ class RoleSelectMenu(DefaultableSelectMenu):
 
 
 class MentionableSelectMenu(DefaultableSelectMenu):
+    """
+    Represents a mentional select component, which includes users, roles, and channels.
+
+    Attributes:
+        placeholder str: The custom placeholder text to show if nothing is selected, max 100 characters.
+        min_values Optional[int]: The minimum number of items that must be chosen. (default 1, min 0, max 25)
+        max_values Optional[int]: The maximum number of items that can be chosen. (default 1, max 25)
+        custom_id str: A developer-defined identifier for the select, max 100 characters.
+        default_values list[BaseUser, Role, BaseChannel, Member, SelectDefaultValues]: A list of default values to pre-select in the select.
+        disabled bool: Disable the select and make it not intractable, default false.
+        type Union[ComponentType, int]: The type of component, as defined by discord. This cannot be modified.
+
+    """
+
     def __init__(
         self,
         *,
@@ -706,6 +779,20 @@ class MentionableSelectMenu(DefaultableSelectMenu):
 
 
 class ChannelSelectMenu(DefaultableSelectMenu):
+    """
+    Represents a chanel select component.
+
+    Attributes:
+        placeholder str: The custom placeholder text to show if nothing is selected, max 100 characters.
+        min_values Optional[int]: The minimum number of items that must be chosen. (default 1, min 0, max 25)
+        max_values Optional[int]: The maximum number of items that can be chosen. (default 1, max 25)
+        custom_id str: A developer-defined identifier for the select, max 100 characters.
+        default_values list[BaseChannel, SelectDefaultValues]: A list of default values to pre-select in the select.
+        disabled bool: Disable the select and make it not intractable, default false.
+        type Union[ComponentType, int]: The type of component, as defined by discord. This cannot be modified.
+
+    """
+
     def __init__(
         self,
         *,
@@ -718,10 +805,7 @@ class ChannelSelectMenu(DefaultableSelectMenu):
         default_values: (
             list[
                 Union[
-                    "interactions.models.discord.BaseUser",
-                    "interactions.models.discord.Role",
                     "interactions.models.discord.BaseChannel",
-                    "interactions.models.discord.Member",
                     SelectDefaultValues,
                 ],
             ]
@@ -763,6 +847,389 @@ class ChannelSelectMenu(DefaultableSelectMenu):
         }
 
 
+class SectionComponent(BaseComponent):
+    """
+    A top-level layout component that allows you to join text contextually with an accessory.
+
+    Attributes:
+        components list[TextDisplayComponent]: The text components to include in this section.
+        accessory Button | ThumbnailComponent: The accessory to include in this section.
+        type Union[ComponentType, int]: The type of component, as defined by discord. This cannot be modified.
+
+    """
+
+    components: "list[TextDisplayComponent]"
+    accessory: "Button | ThumbnailComponent"
+
+    def __init__(
+        self,
+        *,
+        components: "list[TextDisplayComponent] | TextDisplayComponent | None" = None,
+        accessory: "Button | ThumbnailComponent",
+    ):
+        if isinstance(components, TextDisplayComponent):
+            components = [components]
+
+        self.components = components or []
+        self.accessory = accessory
+        self.type = ComponentType.SECTION
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "SectionComponent":
+        return cls(
+            components=[BaseComponent.from_dict_factory(component) for component in data["components"]], accessory=BaseComponent.from_dict_factory(data["accessory"])  # type: ignore
+        )
+
+    def __repr__(self) -> str:
+        return f"<{self.__class__.__name__} type={self.type} components={self.components} accessory={self.accessory}>"
+
+    def to_dict(self) -> dict:
+        return {
+            "type": self.type.value,
+            "components": [c.to_dict() for c in self.components],
+            "accessory": self.accessory.to_dict(),
+        }
+
+
+class TextDisplayComponent(BaseComponent):
+    """
+    A top-level content component that allows you to add text to your message.
+
+    Attributes:
+        content str: Text that will be displayed, similar to a message.
+        type Union[ComponentType, int]: The type of component, as defined by discord. This cannot be modified.
+
+    """
+
+    content: str
+
+    def __init__(self, content: str):
+        self.content = content
+        self.type = ComponentType.TEXT_DISPLAY
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "TextDisplayComponent":
+        return cls(data["content"])
+
+    def __repr__(self) -> str:
+        return f"<{self.__class__.__name__} type={self.type} style={self.content}>"
+
+    def to_dict(self) -> dict:
+        return {
+            "type": self.type.value,
+            "content": self.content,
+        }
+
+
+class ThumbnailComponent(BaseComponent):
+    """
+    A content component that is a small image only usable as an accessory in a section.
+
+    Attributes:
+        media UnfurledMediaItem: The media item to display as a thumbnail.
+        description Optional[str]: An optional description to show below the thumbnail.
+        spoiler bool: Whether the thumbnail should be marked as a spoiler, default false.
+        type Union[ComponentType, int]: The type of component, as defined by discord. This cannot be modified.
+
+    """
+
+    media: UnfurledMediaItem
+    description: Optional[str] = None
+    spoiler: bool = False
+
+    def __init__(self, media: UnfurledMediaItem | str, *, description: Optional[str] = None, spoiler: bool = False):
+        self.media = media if isinstance(media, UnfurledMediaItem) else UnfurledMediaItem(url=media)
+        self.description = description
+        self.spoiler = spoiler
+        self.type = ComponentType.THUMBNAIL
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "ThumbnailComponent":
+        return cls(
+            media=UnfurledMediaItem.from_dict(data["media"]),
+            description=data.get("description"),
+            spoiler=data.get("spoiler", False),
+        )
+
+    def __repr__(self) -> str:
+        return f"<{self.__class__.__name__} type={self.type} media={self.media} description={self.description} spoiler={self.spoiler}>"
+
+    def to_dict(self) -> dict:
+        return {
+            "type": self.type.value,
+            "media": self.media.to_dict(),
+            "description": self.description,
+            "spoiler": self.spoiler,
+        }
+
+
+class MediaGalleryItem(DictSerializationMixin):
+    """
+    A basic object for displaying a media attachment.
+
+    Attributes:
+        media UnfurledMediaItem: The media item to display in the gallery.
+        description Optional[str]: An optional description to show below the media.
+        spoiler bool: Whether the media should be marked as a spoiler, default false.
+        type Union[ComponentType, int]: The type of component, as defined by discord. This cannot be modified.
+
+    """
+
+    media: UnfurledMediaItem
+    description: Optional[str] = None
+    spoiler: bool = False
+
+    def __init__(self, media: UnfurledMediaItem | str, *, description: Optional[str] = None, spoiler: bool = False):
+        self.media = media if isinstance(media, UnfurledMediaItem) else UnfurledMediaItem(url=media)
+        self.description = description
+        self.spoiler = spoiler
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "MediaGalleryItem":
+        return cls(
+            media=UnfurledMediaItem.from_dict(data["media"]),
+            description=data.get("description"),
+            spoiler=data.get("spoiler", False),
+        )
+
+    def __repr__(self) -> str:
+        return f"<{self.__class__.__name__} media={self.media} description={self.description} spoiler={self.spoiler}>"
+
+    def to_dict(self) -> dict:
+        return {
+            "media": self.media.to_dict(),
+            "description": self.description,
+            "spoiler": self.spoiler,
+        }
+
+
+class MediaGalleryComponent(BaseComponent):
+    """
+    A top-level content component that allows you to display 1-10 media attachments in an organized gallery format.
+
+    Attributes:
+        items list[MediaGalleryItem]: A list of media gallery items to display, max 10.
+        type Union[ComponentType, int]: The type of component, as defined by discord. This cannot be modified.
+
+    """
+
+    items: list[MediaGalleryItem]
+
+    def __init__(self, items: list[MediaGalleryItem | str] | None = None):
+        self.items = [i if isinstance(i, MediaGalleryItem) else MediaGalleryItem(i) for i in items] if items else []
+        self.type = ComponentType.MEDIA_GALLERY
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "MediaGalleryComponent":
+        return cls([MediaGalleryItem.from_dict(item) for item in data["items"]])
+
+    def __repr__(self) -> str:
+        return f"<{self.__class__.__name__} type={self.type} items={self.items}>"
+
+    def to_dict(self) -> dict:
+        return {
+            "type": self.type.value,
+            "items": [item.to_dict() for item in self.items],
+        }
+
+
+class FileComponent(BaseComponent):
+    """
+    A top-level component that allows you to display an uploaded file in a component.
+
+    Attributes:
+        file UnfurledMediaItem: The media item to display as a file.
+        spoiler bool: Whether the file should be marked as a spoiler, default false.
+        type Union[ComponentType, int]: The type of component, as defined by discord. This cannot be modified.
+
+    """
+
+    file: UnfurledMediaItem
+    spoiler: bool = False
+
+    def __init__(self, file: UnfurledMediaItem | str, *, spoiler: bool = False):
+        self.file = file if isinstance(file, UnfurledMediaItem) else UnfurledMediaItem(url=file)
+        self.spoiler = spoiler
+        self.type = ComponentType.FILE
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "FileComponent":
+        return cls(file=UnfurledMediaItem.from_dict(data["file"]), spoiler=data.get("spoiler", False))
+
+    def __repr__(self) -> str:
+        return f"<{self.__class__.__name__} type={self.type} file={self.file} spoiler={self.spoiler}>"
+
+    def to_dict(self) -> dict:
+        return {
+            "type": self.type.value,
+            "file": self.file.to_dict(),
+            "spoiler": self.spoiler,
+        }
+
+
+class SeparatorComponent(BaseComponent):
+    """
+    A top-level layout component that adds vertical padding and visual division between other components.
+
+    Attributes:
+        divider bool: Whether this is a divider, which adds a horizontal line, default false.
+        spacing SeparatorSpacingSize | int: The amount of vertical space to add, default SeparatorSpacingSize.SMALL.
+        type Union[ComponentType, int]: The type of component, as defined by discord. This cannot be modified.
+
+    """
+
+    divider: bool = False
+    spacing: SeparatorSpacingSize = SeparatorSpacingSize.SMALL
+
+    def __init__(self, *, divider: bool = False, spacing: SeparatorSpacingSize | int = SeparatorSpacingSize.SMALL):
+        self.divider = divider
+        self.spacing = SeparatorSpacingSize(spacing)
+        self.type = ComponentType.SEPARATOR
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "SeparatorComponent":
+        return cls(divider=data.get("divider", False), spacing=data.get("spacing", SeparatorSpacingSize.SMALL))
+
+    def __repr__(self) -> str:
+        return f"<{self.__class__.__name__} type={self.type} divider={self.divider} spacing={self.spacing}>"
+
+    def to_dict(self) -> dict:
+        return {
+            "type": self.type.value,
+            "divider": self.divider,
+            "spacing": self.spacing,
+        }
+
+
+class ContainerComponent(
+    BaseComponent,
+    UserList[
+        ActionRow | SectionComponent | TextDisplayComponent | MediaGalleryComponent | FileComponent | SeparatorComponent
+    ],
+):
+    """
+    A top-level layout component. Containers are visually distinct from surrounding components and have an optional customizable color bar.
+
+    Attributes:
+        components list[ActionRow | SectionComponent | TextDisplayComponent | MediaGalleryComponent | FileComponent | SeparatorComponent]: The components to include in this container.
+        accent_color Optional[int]: The color of the container as an integer value, default None.
+        spoiler bool: Whether the container should be marked as a spoiler, default false.
+        type Union[ComponentType, int]: The type of component, as defined by discord. This cannot be modified.
+
+    """
+
+    accent_color: Optional[int] = None
+    spoiler: bool = False
+
+    def __init__(
+        self,
+        *components: ActionRow
+        | SectionComponent
+        | TextDisplayComponent
+        | MediaGalleryComponent
+        | FileComponent
+        | SeparatorComponent,
+        accent_color: Optional[int | str | Color] = None,
+        spoiler: bool = False,
+    ):
+        self.data = list(components)
+        self.accent_color = process_color(accent_color)
+        self.spoiler = spoiler
+        self.type = ComponentType.CONTAINER
+
+    @property
+    def components(
+        self,
+    ) -> list[
+        ActionRow | SectionComponent | TextDisplayComponent | MediaGalleryComponent | FileComponent | SeparatorComponent
+    ]:
+        return self.data
+
+    @components.setter
+    def components(
+        self,
+        value: list[
+            ActionRow
+            | SectionComponent
+            | TextDisplayComponent
+            | MediaGalleryComponent
+            | FileComponent
+            | SeparatorComponent
+        ],
+    ) -> None:
+        self.data = value
+
+    @overload
+    def __getitem__(
+        self, i: int
+    ) -> (
+        ActionRow | SectionComponent | TextDisplayComponent | MediaGalleryComponent | FileComponent | SeparatorComponent
+    ): ...
+
+    @overload
+    def __getitem__(self, i: slice) -> Self: ...
+
+    def __getitem__(
+        self, i: int | slice
+    ) -> (
+        Self
+        | ActionRow
+        | SectionComponent
+        | TextDisplayComponent
+        | MediaGalleryComponent
+        | FileComponent
+        | SeparatorComponent
+    ):
+        if isinstance(i, slice):
+            return self.__class__(*self.data[i], accent_color=self.accent_color, spoiler=self.spoiler)
+        return self.data[i]
+
+    def __add__(self, other: Any) -> Self:
+        if isinstance(other, ContainerComponent):
+            return self.__class__(*(self.data + other.data), accent_color=self.accent_color, spoiler=self.spoiler)
+        if isinstance(other, UserList):
+            return self.__class__(*(self.data + other.data), accent_color=self.accent_color, spoiler=self.spoiler)
+        if isinstance(other, type(self.data)):
+            return self.__class__(*(self.data + other), accent_color=self.accent_color, spoiler=self.spoiler)
+        return self.__class__(*(self.data + list(other)), accent_color=self.accent_color, spoiler=self.spoiler)
+
+    def __radd__(self, other: Any) -> Self:
+        if isinstance(other, ContainerComponent):
+            return self.__class__(*(self.data + other.data), accent_color=other.accent_color, spoiler=other.spoiler)
+        if isinstance(other, UserList):
+            return self.__class__(*(other.data + self.data), accent_color=self.accent_color, spoiler=self.spoiler)
+        if isinstance(other, type(self.data)):
+            return self.__class__(*(other + self.data), accent_color=self.accent_color, spoiler=self.spoiler)
+        return self.__class__(*(list(other) + self.data), accent_color=self.accent_color, spoiler=self.spoiler)
+
+    def __mul__(self, n: int) -> Self:
+        return self.__class__(*(self.data * n), accent_color=self.accent_color, spoiler=self.spoiler)
+
+    __rmul__ = __mul__
+
+    def copy(self) -> Self:
+        return self.__class__(*self.data, accent_color=self.accent_color, spoiler=self.spoiler)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> Self:
+        return cls(
+            *[BaseComponent.from_dict_factory(component) for component in data["components"]],
+            accent_color=data.get("accent_color"),
+            spoiler=data.get("spoiler", False),
+        )
+
+    def __repr__(self) -> str:
+        return f"<{self.__class__.__name__} type={self.type} components={self.components} accent_color={self.accent_color} spoiler={self.spoiler}>"
+
+    def to_dict(self) -> dict:
+        return {
+            "type": self.type.value,
+            "components": [component.to_dict() for component in self.components],
+            "accent_color": self.accent_color,
+            "spoiler": self.spoiler,
+        }
+
+
 def process_components(
     components: Optional[
         Union[
@@ -771,7 +1238,7 @@ def process_components(
             BaseComponent,
             Dict,
         ]
-    ]
+    ],
 ) -> List[Dict]:
     """
     Process the passed components into a format discord will understand.
@@ -806,6 +1273,7 @@ def process_components(
 
         if all(isinstance(c, list) for c in components):
             # list of lists... actionRow-less sending
+            # note: we're assuming if someone passes a list of lists, they mean to use v1 components
             return [ActionRow(*row).to_dict() for row in components]
 
         if all(issubclass(type(c), InteractiveComponent) for c in components):
@@ -815,6 +1283,9 @@ def process_components(
         if all(isinstance(c, ActionRow) for c in components):
             # we have a list of action rows
             return [action_row.to_dict() for action_row in components]
+
+        # assume just a list of components
+        return [c if isinstance(c, dict) else c.to_dict() for c in components]
 
     raise ValueError(f"Invalid components: {components}")
 
@@ -840,7 +1311,7 @@ def spread_to_rows(*components: Union[ActionRow, Button, StringSelectMenu], max_
     return ActionRow.split_components(*components, count_per_row=max_in_row)
 
 
-def get_components_ids(component: Union[str, dict, list, InteractiveComponent]) -> Iterator[str]:
+def get_components_ids(component: Union[str, dict, list, InteractiveComponent, Sequence]) -> Iterator[str]:
     """
     Creates a generator with the `custom_id` of a component or list of components.
 
@@ -880,4 +1351,11 @@ TYPE_COMPONENT_MAPPING = {
     ComponentType.CHANNEL_SELECT: ChannelSelectMenu,
     ComponentType.ROLE_SELECT: RoleSelectMenu,
     ComponentType.MENTIONABLE_SELECT: MentionableSelectMenu,
+    ComponentType.SECTION: SectionComponent,
+    ComponentType.TEXT_DISPLAY: TextDisplayComponent,
+    ComponentType.THUMBNAIL: ThumbnailComponent,
+    ComponentType.MEDIA_GALLERY: MediaGalleryComponent,
+    ComponentType.FILE: FileComponent,
+    ComponentType.SEPARATOR: SeparatorComponent,
+    ComponentType.CONTAINER: ContainerComponent,
 }

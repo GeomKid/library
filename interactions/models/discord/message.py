@@ -42,6 +42,7 @@ from .enums import (
     MessageFlags,
     MessageType,
     IntegrationType,
+    ComponentType,
 )
 from .snowflake import (
     Snowflake,
@@ -56,19 +57,19 @@ if TYPE_CHECKING:
     from interactions.client import Client
 
 __all__ = (
+    "AllowedMentions",
     "Attachment",
+    "BaseMessage",
     "ChannelMention",
+    "Message",
     "MessageActivity",
-    "MessageReference",
     "MessageInteraction",
     "MessageInteractionMetadata",
-    "AllowedMentions",
-    "BaseMessage",
-    "Message",
+    "MessageReference",
     "MessageType",
     "process_allowed_mentions",
-    "process_message_reference",
     "process_message_payload",
+    "process_message_reference",
 )
 
 channel_mention = re.compile(r"<#(?P<id>[0-9]{17,})>")
@@ -614,7 +615,7 @@ class Message(BaseMessage):
         return data
 
     @property
-    def system_content(self) -> Optional[str]:
+    def system_content(self) -> Optional[str]:  # noqa: C901
         """Content for system messages. (boosts, welcomes, etc)"""
         match self.type:
             case MessageType.USER_PREMIUM_GUILD_SUBSCRIPTION:
@@ -981,7 +982,7 @@ def process_allowed_mentions(allowed_mentions: Optional[Union[AllowedMentions, d
 
 
 def process_message_reference(
-    message_reference: Optional[Union[MessageReference, Message, dict, "Snowflake_Type"]]
+    message_reference: Optional[Union[MessageReference, Message, dict, "Snowflake_Type"]],
 ) -> Optional[dict]:
     """
     Process mention references into a dictionary.
@@ -1066,6 +1067,16 @@ def process_message_payload(
         embeds = embeds if all(e is not None for e in embeds) else None
 
     components = models.process_components(components)
+    if components:
+        # TODO: should we check for content/embeds? should this be moved elsewhere?
+        if any(c["type"] in ComponentType.v2_component_types() for c in components):
+            if not flags:
+                flags = 0
+            flags |= MessageFlags.IS_COMPONENTS_V2
+
+            if content or embeds:
+                raise ValueError("Cannot send content or embeds with v2 components")
+
     if stickers:
         stickers = [to_snowflake(sticker) for sticker in stickers]
     allowed_mentions = process_allowed_mentions(allowed_mentions)
